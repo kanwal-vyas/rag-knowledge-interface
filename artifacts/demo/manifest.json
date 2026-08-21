@@ -1,0 +1,14 @@
+{
+  "sample_rows_per_split": 100,
+  "total_passages": 3977,
+  "raw_passages": 3994,
+  "language_counts": {
+    "en": 1989,
+    "hi": 1988
+  },
+  "bm25_documents": 3977,
+  "bm25_vocab_size": 21242,
+  "bm25_build_time_ms": 197.3,
+  "demo_queries_count": 5,
+  "total_build_time_ms": 811.2
+}

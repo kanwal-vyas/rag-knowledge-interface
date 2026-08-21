@@ -1,0 +1,276 @@
+"""
+Tests for STT provider, audio validation, voice pipeline, and language mapping.
+
+Covers:
+- Audio validation (empty, oversized, unsupported format)
+- Sarvam STT provider configuration
+- Language code mapping (BCP-47 → ISO 639-1)
+- Stub STT provider
+- Voice pipeline integration
+- Error handling (no STT provider, empty transcript)
+- End-to-end voice → text pipeline
+"""
+from __future__ import annotations
+
+import pytest
+
+from app.core.errors import InvalidAudioError, STTFailureError
+from app.services.sarvam_stt import (
+    _BCP47_TO_ISO,
+    _map_language_code,
+    _validate_audio,
+)
+from app.services.stub_stt import StubSTTProvider
+
+# ---------------------------------------------------------------------------
+# Audio Validation Tests
+# ---------------------------------------------------------------------------
+
+class TestAudioValidation:
+    """Tests for audio input validation."""
+
+    def test_empty_audio_rejected(self) -> None:
+        """Empty audio bytes raise InvalidAudioError."""
+        with pytest.raises(InvalidAudioError, match="empty"):
+            _validate_audio(b"", "wav")
+
+    def test_oversized_audio_rejected(self) -> None:
+        """Audio exceeding 10MB is rejected."""
+        large_audio = b"\x00" * (10 * 1024 * 1024 + 1)
+        with pytest.raises(InvalidAudioError, match="too large"):
+            _validate_audio(large_audio, "wav")
+
+    def test_unsupported_format_rejected(self) -> None:
+        """Unsupported audio format is rejected."""
+        with pytest.raises(InvalidAudioError, match="Unsupported"):
+            _validate_audio(b"some audio data", "xyz")
+
+    def test_wav_accepted(self) -> None:
+        """WAV format is accepted."""
+        _validate_audio(b"RIFF....WAVEfmt", "wav")
+
+    def test_mp3_accepted(self) -> None:
+        """MP3 format is accepted."""
+        _validate_audio(b"ID3...", "mp3")
+
+    def test_flac_accepted(self) -> None:
+        """FLAC format is accepted."""
+        _validate_audio(b"fLaC...", "flac")
+
+    def test_ogg_accepted(self) -> None:
+        """OGG format is accepted."""
+        _validate_audio(b"OggS...", "ogg")
+
+    def test_case_insensitive_format(self) -> None:
+        """Format check is case-insensitive."""
+        _validate_audio(b"data", "WAV")
+        _validate_audio(b"data", "Mp3")
+
+
+# ---------------------------------------------------------------------------
+# Language Code Mapping Tests
+# ---------------------------------------------------------------------------
+
+class TestLanguageCodeMapping:
+    """Tests for BCP-47 to ISO 639-1 language code mapping."""
+
+    def test_hindi_mapping(self) -> None:
+        """BCP-47 hi-IN maps to ISO hi."""
+        assert _map_language_code("hi-IN") == "hi"
+
+    def test_english_mapping(self) -> None:
+        """BCP-47 en-IN maps to ISO en."""
+        assert _map_language_code("en-IN") == "en"
+
+    def test_bengali_mapping(self) -> None:
+        """BCP-47 bn-IN maps to ISO bn."""
+        assert _map_language_code("bn-IN") == "bn"
+
+    def test_tamil_mapping(self) -> None:
+        """BCP-47 ta-IN maps to ISO ta."""
+        assert _map_language_code("ta-IN") == "ta"
+
+    def test_telugu_mapping(self) -> None:
+        """BCP-47 te-IN maps to ISO te."""
+        assert _map_language_code("te-IN") == "te"
+
+    def test_gujarati_mapping(self) -> None:
+        """BCP-47 gu-IN maps to ISO gu."""
+        assert _map_language_code("gu-IN") == "gu"
+
+    def test_kannada_mapping(self) -> None:
+        """BCP-47 kn-IN maps to ISO kn."""
+        assert _map_language_code("kn-IN") == "kn"
+
+    def test_malayalam_mapping(self) -> None:
+        """BCP-47 ml-IN maps to ISO ml."""
+        assert _map_language_code("ml-IN") == "ml"
+
+    def test_punjabi_mapping(self) -> None:
+        """BCP-47 pa-IN maps to ISO pa."""
+        assert _map_language_code("pa-IN") == "pa"
+
+    def test_unknown_code_fallback(self) -> None:
+        """Unknown BCP-47 code falls back to language part."""
+        assert _map_language_code("xx-YY") == "xx"
+
+    def test_none_defaults_to_english(self) -> None:
+        """None language code defaults to English."""
+        assert _map_language_code(None) == "en"
+
+    def test_empty_string_defaults_to_english(self) -> None:
+        """Empty language code defaults to English."""
+        assert _map_language_code("") == "en"
+
+    def test_all_mapped_codes_present(self) -> None:
+        """All BCP-47 codes in the mapping have valid ISO counterparts."""
+        for bcp47, iso in _BCP47_TO_ISO.items():
+            assert len(iso) >= 2, f"ISO code {iso} for {bcp47} is too short"
+            assert bcp47.endswith("-IN"), f"BCP-47 code {bcp47} doesn't end with -IN"
+
+    def test_mapping_deterministic(self) -> None:
+        """Language mapping is deterministic."""
+        for code in ["hi-IN", "en-IN", "bn-IN", "ta-IN"]:
+            assert _map_language_code(code) == _map_language_code(code)
+
+
+# ---------------------------------------------------------------------------
+# Stub STT Provider Tests
+# ---------------------------------------------------------------------------
+
+class TestStubSTTProvider:
+    """Tests for the stub STT provider."""
+
+    def test_stub_returns_transcript(self) -> None:
+        """Stub returns configured transcript."""
+        stub = StubSTTProvider(text="Hello world", lang="en")
+        result = stub.transcribe(b"fake audio", "wav")
+        assert result.text == "Hello world"
+        assert result.lang == "en"
+        assert result.provider == "stub"
+
+    def test_stub_empty_audio_rejected(self) -> None:
+        """Stub rejects empty audio."""
+        stub = StubSTTProvider()
+        with pytest.raises(InvalidAudioError):
+            stub.transcribe(b"", "wav")
+
+    def test_stub_respects_language_hint(self) -> None:
+        """Stub uses language hint when provided."""
+        stub = StubSTTProvider(text="test", lang="en")
+        result = stub.transcribe(b"audio", "wav", language_hint="hi")
+        assert result.lang == "hi"
+
+    def test_stub_has_metadata(self) -> None:
+        """Stub returns metadata fields."""
+        stub = StubSTTProvider()
+        result = stub.transcribe(b"audio", "wav")
+        assert result.request_id is not None
+        assert result.latency_ms is not None
+        assert result.confidence is not None
+
+
+# ---------------------------------------------------------------------------
+# Voice Pipeline Tests
+# ---------------------------------------------------------------------------
+
+class TestVoicePipeline:
+    """End-to-end voice pipeline tests."""
+
+    def _make_pipeline(self, stt_text: str = "capital of India", stt_lang: str = "en"):
+        """Create a TextPipeline with stub components."""
+        from app.harness.text_pipeline import TextPipeline
+
+        passage_store = {
+            "p001": "The capital of India is New Delhi.",
+            "p002": "Python is a programming language.",
+        }
+
+        class MockRetriever:
+            def retrieve(self, query, mode, top_k):
+                from app.models.retrieval import Language, Passage, RetrievalResult
+                return [
+                    RetrievalResult(
+                        passage=Passage(
+                            passage_id="p001",
+                            text=passage_store["p001"],
+                            lang=Language("en"),
+                        ),
+                        score=0.9,
+                        source="mock",
+                    ),
+                ]
+
+        from generation.deepseek_provider import StubGenerator
+
+        return TextPipeline(
+            retriever=MockRetriever(),
+            generator=StubGenerator(answer="New Delhi.", grounded=True),
+            passage_store=passage_store,
+            stt_provider=StubSTTProvider(text=stt_text, lang=stt_lang),
+        )
+
+    def test_voice_pipeline_success(self) -> None:
+        """Voice pipeline completes end-to-end."""
+        pipeline = self._make_pipeline(stt_text="capital of India")
+        result = pipeline.run_voice(b"fake audio data", "wav")
+        assert result.response is not None
+        assert result.response.answer_text
+        assert result.latency.total_ms > 0
+        assert result.latency.stt_ms is not None
+
+    def test_voice_pipeline_no_stt_provider(self) -> None:
+        """Voice pipeline fails without STT provider."""
+        from app.harness.text_pipeline import TextPipeline
+
+        pipeline = TextPipeline(
+            retriever=None,
+            generator=None,
+            passage_store={},
+            stt_provider=None,
+        )
+        with pytest.raises(STTFailureError, match="No STT provider"):
+            pipeline.run_voice(b"audio", "wav")
+
+    def test_voice_pipeline_empty_transcript(self) -> None:
+        """Voice pipeline fails on empty transcript."""
+        pipeline = self._make_pipeline(stt_text="")
+        # Empty transcript after STT should raise STTFailureError.
+        with pytest.raises(STTFailureError, match="empty transcript"):
+            pipeline.run_voice(b"audio", "wav")
+
+    def test_voice_pipeline_stt_failure(self) -> None:
+        """Voice pipeline handles STT failure gracefully."""
+        from app.harness.text_pipeline import TextPipeline
+
+        class FailingSTT:
+            def transcribe(self, audio_bytes, audio_format, language_hint=None):
+                raise STTFailureError("API timeout")
+
+        pipeline = TextPipeline(
+            retriever=None,
+            generator=None,
+            passage_store={},
+            stt_provider=FailingSTT(),
+        )
+        with pytest.raises(STTFailureError):
+            pipeline.run_voice(b"audio", "wav")
+
+    def test_voice_latency_recorded(self) -> None:
+        """Voice pipeline records STT latency."""
+        pipeline = self._make_pipeline()
+        result = pipeline.run_voice(b"audio data", "wav")
+        assert result.latency.stt_ms is not None
+        assert result.latency.stt_ms >= 0
+        assert result.latency.sparse_retrieval_ms is not None
+        assert result.latency.context_assembly_ms is not None
+
+    def test_voice_hindi_stt(self) -> None:
+        """Voice pipeline handles Hindi STT output."""
+        pipeline = self._make_pipeline(
+            stt_text="भारत की राजधानी",
+            stt_lang="hi",
+        )
+        result = pipeline.run_voice(b"hindi audio", "wav")
+        assert result.response is not None
+        assert result.latency.stt_ms is not None

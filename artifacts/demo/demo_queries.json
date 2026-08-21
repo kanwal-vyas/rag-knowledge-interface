@@ -1,0 +1,32 @@
+[
+  {
+    "query": "What information is available about this topic?",
+    "lang": "en",
+    "expected_retrieval": true,
+    "note": "Generic English query"
+  },
+  {
+    "query": "यह क्या है",
+    "lang": "hi",
+    "expected_retrieval": true,
+    "note": "Simple Hindi query"
+  },
+  {
+    "query": "presence communication amid scientific",
+    "lang": "en",
+    "expected_retrieval": true,
+    "note": "Uses terms from actual corpus"
+  },
+  {
+    "query": "वैज्ञानिक दिमाग के बीच संचार की उपस्थिति मैनहट्टन परियोजना क",
+    "lang": "hi",
+    "expected_retrieval": true,
+    "note": "Uses text from actual Hindi passage"
+  },
+  {
+    "query": "quantum computing superposition entanglement qubits",
+    "lang": "en",
+    "expected_retrieval": false,
+    "note": "Out-of-domain — should find nothing"
+  }
+]
