@@ -11,6 +11,7 @@ guessed default.
 
 from __future__ import annotations
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -32,7 +33,10 @@ class Settings(BaseSettings):
 
     # STT — ARCHITECTURE DETAIL MISSING, no default provider assumed.
     stt_provider: str | None = None
-    stt_api_key: str | None = None
+    stt_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("STT_API_KEY", "SARVAM_API_KEY"),
+    )
 
     # Generation — Gemini (primary) or DeepSeek (fallback).
     generation_provider: str | None = None  # "gemini" or "deepseek"
