@@ -19,6 +19,7 @@ dependencies = [
     "httpx>=0.27,<0.28",           # Sarvam STT API calls
     "openai>=1.0,<2",              # DeepSeek generation (OpenAI-compatible)
     "python-multipart>=0.0.9",     # FastAPI file upload support
+    "google-genai>=1.0,<3",         # Gemini generation (google-genai SDK)
 ]
 
 [project.optional-dependencies]
