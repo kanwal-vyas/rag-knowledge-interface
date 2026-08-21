@@ -53,6 +53,9 @@ class Settings(BaseSettings):
     reranker_option: str | None = None
 
     # Demo mode — load prebuilt BM25 index from artifacts/demo/
+    # CORS — comma-separated list of allowed origins.
+    cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173"
+
     demo_mode: bool = False
     demo_index_path: str = "artifacts/demo/bm25_index.json"
     demo_passage_store_path: str = "artifacts/demo/passage_store.json"
