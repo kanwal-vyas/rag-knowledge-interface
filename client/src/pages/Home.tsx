@@ -219,13 +219,7 @@ export default function Home() {
                     {genError ? (
                       <>
                         <div className="grounding-badge error"><CircleHelp size={14} /> Generation error</div>
-                        <div className="answer-text"><span>The knowledge service encountered an error while generating the answer.</span></div>
-                        {result.latency.error && (
-                          <details className="gen-error-details">
-                            <summary>Technical details</summary>
-                            <p className="gen-error-raw">{result.latency.error.replace(/\b[A-Za-z0-9_-]{20,}\b/g, "[REDACTED]")}</p>
-                          </details>
-                        )}
+                        <div className="answer-text"><span>{result.latency.error?.replace(/\b[A-Za-z0-9_-]{20,}\b/g, "[REDACTED]") || "The knowledge service encountered an error while generating the answer."}</span></div>
                       </>
                     ) : result.answer ? (
                       <>

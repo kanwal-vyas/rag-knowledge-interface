@@ -9,9 +9,15 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from app.core.errors import RateLimitError
 from app.models.generation import Context
 from app.models.retrieval import Language, Passage, Query, RetrievalResult
-from generation.gemini_provider import GeminiGenerator, _build_user_prompt
+from generation.gemini_provider import (
+    GeminiGenerator,
+    _build_user_prompt,
+    _extract_retry_delay,
+    _is_rate_limit,
+)
 
 
 def _make_context(query_text: str = "What is AI?", lang: str = "en") -> Context:
@@ -184,6 +190,114 @@ class TestGeminiGeneration:
     def test_no_api_key_not_logged(self) -> None:
         gen = GeminiGenerator(api_key="secret-key-12345")
         assert gen.api_key == "secret-key-12345"
+
+
+# ---------------------------------------------------------------------------
+# Rate limit (429) tests
+# ---------------------------------------------------------------------------
+
+class TestGeminiRateLimit:
+    """Tests for Gemini 429 RESOURCE_EXHAUSTED handling."""
+
+    def test_is_rate_limit_detects_client_error_429(self) -> None:
+        """google.genai.errors.ClientError with code=429 is a rate limit."""
+        try:
+            from google.genai.errors import ClientError
+        except ImportError:
+            pytest.skip("google-genai not installed")
+        exc = ClientError(code=429, response_json={})
+        assert _is_rate_limit(exc) is True
+
+    def test_is_rate_limit_rejects_400(self) -> None:
+        """ClientError with code=400 is NOT a rate limit."""
+        try:
+            from google.genai.errors import ClientError
+        except ImportError:
+            pytest.skip("google-genai not installed")
+        exc = ClientError(code=400, response_json={})
+        assert _is_rate_limit(exc) is False
+
+    def test_is_rate_limit_detects_string_429(self) -> None:
+        """String containing 429 and RESOURCE_EXHAUSTED is detected."""
+        assert _is_rate_limit(Exception("429 RESOURCE_EXHAUSTED")) is True
+
+    def test_is_rate_limit_rejects_generic_error(self) -> None:
+        """Generic RuntimeError is NOT a rate limit."""
+        assert _is_rate_limit(RuntimeError("something broke")) is False
+
+    def test_extract_retry_delay_from_client_error(self) -> None:
+        """Retry delay is extracted from ClientError response_json."""
+        try:
+            from google.genai.errors import ClientError
+        except ImportError:
+            pytest.skip("google-genai not installed")
+        exc = ClientError(
+            code=429,
+            response_json={"error": {"retryDelay": "54s"}},
+        )
+        assert _extract_retry_delay(exc) == 54
+
+    def test_extract_retry_delay_from_string(self) -> None:
+        """Retry delay is extracted from string representation."""
+        exc = Exception("429 RESOURCE_EXHAUSTED retryDelay: '54s'")
+        assert _extract_retry_delay(exc) == 54
+
+    def test_extract_retry_delay_none_when_absent(self) -> None:
+        """Returns None when no retry delay is present."""
+        exc = Exception("429 rate limited")
+        assert _extract_retry_delay(exc) is None
+
+    @patch("google.genai.Client")
+    def test_generate_raises_rate_limit_on_429(self, mock_client_cls: MagicMock) -> None:
+        """429 from Gemini is converted to RateLimitError."""
+        try:
+            from google.genai.errors import ClientError
+        except ImportError:
+            pytest.skip("google-genai not installed")
+
+        mock_client = MagicMock()
+        mock_client.models.generate_content.side_effect = ClientError(
+            code=429,
+            response_json={"error": {"retryDelay": "54s"}},
+        )
+        mock_client_cls.return_value = mock_client
+
+        gen = GeminiGenerator(api_key="test-key")
+        ctx = _make_context()
+        with pytest.raises(RateLimitError, match="capacity"):
+            gen.generate(ctx)
+
+    @patch("google.genai.Client")
+    def test_generate_rate_limit_includes_retry_seconds(self, mock_client_cls: MagicMock) -> None:
+        """RateLimitError message includes the retry delay."""
+        try:
+            from google.genai.errors import ClientError
+        except ImportError:
+            pytest.skip("google-genai not installed")
+
+        mock_client = MagicMock()
+        mock_client.models.generate_content.side_effect = ClientError(
+            code=429,
+            response_json={"error": {"retryDelay": "30s"}},
+        )
+        mock_client_cls.return_value = mock_client
+
+        gen = GeminiGenerator(api_key="test-key")
+        ctx = _make_context()
+        with pytest.raises(RateLimitError, match="30 seconds"):
+            gen.generate(ctx)
+
+    @patch("google.genai.Client")
+    def test_generate_non_429_still_raises_original(self, mock_client_cls: MagicMock) -> None:
+        """Non-429 errors are NOT converted to RateLimitError."""
+        mock_client = MagicMock()
+        mock_client.models.generate_content.side_effect = RuntimeError("server error")
+        mock_client_cls.return_value = mock_client
+
+        gen = GeminiGenerator(api_key="test-key")
+        ctx = _make_context()
+        with pytest.raises(RuntimeError, match="server error"):
+            gen.generate(ctx)
 
 
 # ---------------------------------------------------------------------------

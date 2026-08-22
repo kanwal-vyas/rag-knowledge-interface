@@ -20,10 +20,12 @@ context. If context is insufficient, the model must refuse to answer.
 from __future__ import annotations
 
 import os
+import re
 import time
 
 import structlog
 
+from app.core.errors import RateLimitError
 from app.models.generation import Context, GenerationResponse
 from generation.base import Generator
 
@@ -77,6 +79,45 @@ _REFUSAL_PHRASES = [
     "does not contain information",
     "no information in the context",
 ]
+
+
+def _is_rate_limit(exc: Exception) -> bool:
+    """Return True if the exception is a Gemini 429 RESOURCE_EXHAUSTED."""
+    try:
+        from google.genai.errors import ClientError
+        if isinstance(exc, ClientError) and exc.code == 429:
+            return True
+    except (ImportError, AttributeError):
+        pass
+    msg = str(exc).lower()
+    return "429" in msg and ("resource_exhausted" in msg or "quota" in msg)
+
+
+def _extract_retry_delay(exc: Exception) -> int | None:
+    """Extract the retry delay in seconds from a Gemini 429 response."""
+    try:
+        from google.genai.errors import ClientError
+        if isinstance(exc, ClientError) and hasattr(exc, "response_json"):
+            rj = exc.response_json
+            if isinstance(rj, dict):
+                error_obj = rj.get("error", {})
+                if isinstance(error_obj, dict):
+                    delay = error_obj.get("retryDelay")
+                    if isinstance(delay, str):
+                        m = re.search(r"(\d+)\s*s", delay)
+                        if m:
+                            return int(m.group(1))
+    except (ImportError, AttributeError, TypeError, ValueError):
+        pass
+    # Fallback: parse the string representation.
+    text = str(exc)
+    m = re.search(r"retryDelay.*?(\d+)s", text)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"retry.delay.*?(\d+)", text, re.IGNORECASE)
+    if m:
+        return int(m.group(1))
+    return None
 
 
 class GeminiGenerator(Generator):
@@ -169,6 +210,24 @@ class GeminiGenerator(Generator):
 
         except Exception as e:
             elapsed_ms = (time.perf_counter() - start_time) * 1000
+
+            # ── Detect 429 RESOURCE_EXHAUSTED ──
+            retry_seconds = _extract_retry_delay(e)
+            if retry_seconds is not None or _is_rate_limit(e):
+                retry_display = f"{retry_seconds} seconds" if retry_seconds else "about 1 minute"
+                logger.warning(
+                    "gemini_rate_limited",
+                    provider="gemini",
+                    model=self.model,
+                    http_status=429,
+                    retry_delay_seconds=retry_seconds,
+                    elapsed_ms=round(elapsed_ms, 1),
+                )
+                raise RateLimitError(
+                    f"The knowledge service is temporarily at capacity. "
+                    f"Please try again in {retry_display}."
+                ) from e
+
             logger.error(
                 "gemini_generation_failed",
                 model=self.model,
