@@ -53,6 +53,7 @@ export class VoiceStreamClient {
   private _chunkCount: number = 0;
   private _firstChunkSent: boolean = false;
   private _firstPartialReceived: boolean = false;
+  private _stopping: boolean = false;
 
   constructor(callbacks: VoiceStreamCallbacks) {
     this.callbacks = callbacks;
@@ -75,6 +76,7 @@ export class VoiceStreamClient {
 
   async start(lang: string = "en") {
     if (this._state !== "idle") return;
+    this._stopping = false;
     this._lang = lang;
     this._sessionId = makeSessionId();
     this._t0 = performance.now();
@@ -86,7 +88,12 @@ export class VoiceStreamClient {
 
     try {
       // 1. Get microphone stream.
-      this.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (this._stopping) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
+      this.stream = stream;
       this.ts("T1: getUserMedia completed");
 
       // 2. Create AudioContext at 16kHz.
@@ -95,6 +102,10 @@ export class VoiceStreamClient {
 
       // 3. Load AudioWorklet processor.
       await this.audioCtx.audioWorklet.addModule("/pcm-processor.js");
+      if (this._stopping) {
+        this.stop();
+        return;
+      }
       this.ts("T3: AudioWorklet loaded");
 
       // 4. Create nodes.
@@ -104,6 +115,7 @@ export class VoiceStreamClient {
 
       // 5. Listen for PCM chunks from the worklet.
       this.workletNode.port.onmessage = (e: MessageEvent<ArrayBuffer>) => {
+        if (this._stopping) return;
         this._chunkCount++;
         if (!this._firstChunkSent) {
           this._firstChunkSent = true;
@@ -124,12 +136,21 @@ export class VoiceStreamClient {
       // 7. Open WebSocket to backend.
       const wsUrl = `${WS_BASE}/voice/stream`;
       console.log(`[Latency] [${this._sessionId}] WebSocket URL: ${wsUrl}`);
-      this.ws = new WebSocket(wsUrl);
+      const ws = new WebSocket(wsUrl);
+      this.ws = ws;
 
-      this.ws.onopen = () => {
+      ws.onopen = () => {
+        if (this.ws !== ws) {
+          try { ws.close(1000, "superseded voice stream"); } catch { /* */ }
+          return;
+        }
+        if (this._stopping || ws.readyState !== WebSocket.OPEN) {
+          this.stop();
+          return;
+        }
         this.ts("T8: WebSocket opened");
         // Send start event with language and session_id.
-        this.ws!.send(JSON.stringify({
+        ws.send(JSON.stringify({
           event: "start",
           lang: this._lang,
           session_id: this._sessionId,
@@ -138,30 +159,42 @@ export class VoiceStreamClient {
         this.ts("T9: start event sent");
       };
 
-      this.ws.onmessage = (e: MessageEvent) => {
+      ws.onmessage = (e: MessageEvent) => {
+        if (this.ws !== ws) return;
         try {
           const data = JSON.parse(e.data);
           this.handleEvent(data);
         } catch { /* ignore parse errors */ }
       };
 
-      this.ws.onclose = (e) => {
+      ws.onclose = (e) => {
+        if (this.ws !== ws) return;
         this.ts(`WebSocket closed code=${e.code} reason="${e.reason}"`);
+        const unexpected = !this._stopping;
+        this.ws = null;
+        if (unexpected) {
+          this.callbacks.onError?.("WebSocket closed unexpectedly", true);
+        }
         this.stop();
       };
 
-      this.ws.onerror = (e) => {
-        console.error(`[Latency] [${this._sessionId}] WebSocket error: URL=${wsUrl} readyState=${this.ws?.readyState}`);
-        this.callbacks.onError?.(
-          `WebSocket connection failed. URL: ${wsUrl}. Check that the backend is running and supports WebSocket upgrades.`,
-          true,
-        );
+      ws.onerror = () => {
+        if (this.ws !== ws) return;
+        console.error(`[Latency] [${this._sessionId}] WebSocket error: URL=${wsUrl} readyState=${ws.readyState}`);
+        if (!this._stopping) {
+          this.callbacks.onError?.(
+            `WebSocket connection failed. URL: ${wsUrl}. Check that the backend is running and supports WebSocket upgrades.`,
+            true,
+          );
+        }
         this.stop();
       };
 
     } catch (err: any) {
-      this.ts(`ERROR: ${err.message}`);
-      this.callbacks.onError?.(err.message || "Failed to start streaming", true);
+      if (!this._stopping) {
+        this.ts(`ERROR: ${err.message}`);
+        this.callbacks.onError?.(err.message || "Failed to start streaming", true);
+      }
       this.stop();
     }
   }
@@ -210,33 +243,71 @@ export class VoiceStreamClient {
     }
   }
 
-  /** Signal end of speech — Sarvam will finalize the transcript. */
+  /**
+   * Stop local capture immediately, then ask the backend to finalize the
+   * existing stream. The socket remains open only long enough to receive the
+   * final/session.end events; stop() performs the final socket close.
+   */
   stopRecording() {
+    if (this._stopping || this._state === "idle") return;
     this.ts("stopRecording() called");
+    this._stopping = true;
+    this.stopAudioCapture();
+
     if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ event: "stop" }));
+      try {
+        this.ws.send(JSON.stringify({ event: "stop" }));
+        this.setState("processing");
+        return;
+      } catch {
+        // Fall through to full teardown if the socket changed state mid-send.
+      }
     }
-    this.workletNode?.port.postMessage("stop");
+
+    // There is no open socket to finalize (including a still-connecting one).
+    this.stop();
   }
 
   /** Full teardown: stop mic, close WS, release resources. */
   stop() {
-    try { this.workletNode?.port.postMessage("stop"); } catch { /* */ }
-    try { this.sourceNode?.disconnect(); } catch { /* */ }
-    try { this.workletNode?.disconnect(); } catch { /* */ }
-    try { this.audioCtx?.close(); } catch { /* */ }
-    try { this.stream?.getTracks().forEach(t => t.stop()); } catch { /* */ }
-    try { this.ws?.close(); } catch { /* */ }
+    this._stopping = true;
+    this.stopAudioCapture();
 
+    const ws = this.ws;
     this.ws = null;
-    this.audioCtx = null;
-    this.workletNode = null;
-    this.sourceNode = null;
-    this.stream = null;
+    if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) {
+      try { ws.close(1000, "voice stream stopped"); } catch { /* already closed */ }
+    }
 
     if (this._state !== "idle") {
       this.ts("stop() — session ended");
       this.setState("idle");
     }
+  }
+
+  /** Release all local audio resources before any network finalization wait. */
+  private stopAudioCapture() {
+    const workletNode = this.workletNode;
+    const sourceNode = this.sourceNode;
+    const audioCtx = this.audioCtx;
+    const stream = this.stream;
+
+    // Clear references first so late async start() steps cannot reuse them.
+    this.workletNode = null;
+    this.sourceNode = null;
+    this.audioCtx = null;
+    this.stream = null;
+
+    // Removing the handler synchronously drops already-queued PCM messages.
+    try { if (workletNode) workletNode.port.onmessage = null; } catch { /* */ }
+    try { workletNode?.port.postMessage("stop"); } catch { /* */ }
+    try { sourceNode?.disconnect(); } catch { /* */ }
+    try { workletNode?.disconnect(); } catch { /* */ }
+    try {
+      if (audioCtx && audioCtx.state !== "closed") {
+        void audioCtx.close().catch(() => {});
+      }
+    } catch { /* already closed */ }
+    try { stream?.getTracks().forEach((track) => track.stop()); } catch { /* */ }
   }
 }

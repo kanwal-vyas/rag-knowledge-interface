@@ -105,6 +105,9 @@ export default function Home() {
   const micAudioCtxRef = useRef<AudioContext | null>(null);
   const micRmsIntervalRef = useRef<number | undefined>(undefined);
   const streamClientRef = useRef<VoiceStreamClient | null>(null);
+  const streamStopTimerRef = useRef<number | undefined>(undefined);
+  const streamStoppingRef = useRef(false);
+  const streamFinalReceivedRef = useRef(false);
   const [partialText, setPartialText] = useState("");
   const [streamLatency, setStreamLatency] = useState<string[]>([]);
 
@@ -117,6 +120,12 @@ export default function Home() {
       if (rec && rec.state !== "inactive") {
         try { rec.stop(); } catch { /* already stopped */ }
       }
+      if (streamStopTimerRef.current) window.clearTimeout(streamStopTimerRef.current);
+      const streamClient = streamClientRef.current;
+      streamClientRef.current = null;
+      streamStoppingRef.current = false;
+      streamFinalReceivedRef.current = false;
+      streamClient?.stop();
       // Release audio URL.
       if (audioUrlRef.current) { URL.revokeObjectURL(audioUrlRef.current); audioUrlRef.current = null; }
     };
@@ -378,23 +387,32 @@ export default function Home() {
 
   // ── STREAMING VOICE ──
   const startStreamingVoice = async () => {
+    // The ref is updated synchronously, so rapid double-clicks cannot create
+    // parallel microphone/WebSocket sessions before React rerenders.
+    if (streamClientRef.current || streamStoppingRef.current || state === "recording" || state === "processing") return;
     setError("");
     setPartialText("");
     setStreamLatency([]);
+    streamFinalReceivedRef.current = false;
     setState("recording");
 
     const client = new VoiceStreamClient({
       onConnected: (latencyMs) => {
+        if (streamClientRef.current !== client) return;
         setStreamLatency(prev => [...prev, `WS connect: ${latencyMs.toFixed(0)}ms`]);
       },
       onTimestamp: (label, ms) => {
         // Frontend timestamps are logged via console in voiceStream.ts.
       },
       onPartial: (text) => {
+        if (streamClientRef.current !== client || streamStoppingRef.current) return;
         setPartialText(text);
         setState("recording");
       },
       onFinal: (text, lang) => {
+        if (streamClientRef.current !== client) return;
+        streamStoppingRef.current = false;
+        streamFinalReceivedRef.current = true;
         setPartialText("");
         setState("processing");
         // Run RAG pipeline with the final transcript.
@@ -413,13 +431,21 @@ export default function Home() {
           });
       },
       onSpeechStart: () => {
+        if (streamClientRef.current !== client) return;
         setStreamLatency(prev => [...prev, `Speech started`]);
       },
       onSpeechEnd: () => {
+        if (streamClientRef.current !== client) return;
         setStreamLatency(prev => [...prev, `Speech ended — finalizing...`]);
       },
       onError: (msg, fatal) => {
+        if (streamClientRef.current !== client) return;
         if (fatal) {
+          if (streamStopTimerRef.current) window.clearTimeout(streamStopTimerRef.current);
+          streamStopTimerRef.current = undefined;
+          streamStoppingRef.current = false;
+          streamFinalReceivedRef.current = false;
+          streamClientRef.current = null;
           setError(`Streaming error: ${msg}`);
           setState("error");
           client.stop();
@@ -428,6 +454,7 @@ export default function Home() {
         }
       },
       onLatency: (totalMs, audioBytes, backendBreakdown) => {
+        if (streamClientRef.current !== client) return;
         setStreamLatency(prev => {
           const next = [...prev, `--- Backend breakdown ---`];
           if (backendBreakdown) {
@@ -440,6 +467,19 @@ export default function Home() {
           return next;
         });
       },
+      onStateChange: (nextState) => {
+        if (nextState === "idle" && streamClientRef.current === client) {
+          if (streamStopTimerRef.current) window.clearTimeout(streamStopTimerRef.current);
+          streamStopTimerRef.current = undefined;
+          streamClientRef.current = null;
+          if (streamStoppingRef.current) {
+            streamStoppingRef.current = false;
+            streamFinalReceivedRef.current = false;
+            setPartialText("");
+            setState("idle");
+          }
+        }
+      },
     });
 
     streamClientRef.current = client;
@@ -447,17 +487,33 @@ export default function Home() {
   };
 
   const stopStreamingVoice = () => {
-    streamClientRef.current?.stopRecording();
-    // The onFinal callback will handle the rest.
-    // If no final transcript arrives in 5s, force stop.
-    setTimeout(() => {
-      if (streamClientRef.current?.state !== "idle") {
-        streamClientRef.current?.stop();
-        if (state === "recording") {
-          setError("Streaming timed out. Try the regular recording.");
-          setState("error");
+    const client = streamClientRef.current;
+    if (!client || streamStoppingRef.current) return;
+
+    streamStoppingRef.current = true;
+    client.stopRecording();
+    // Local capture is already released by stopRecording(); show the normal
+    // non-streaming UI while the backend has a brief chance to send its final.
+    if (streamClientRef.current !== client || client.state === "idle") {
+      streamStoppingRef.current = false;
+      setPartialText("");
+      setState("idle");
+      return;
+    }
+    setState("processing");
+
+    if (streamStopTimerRef.current) window.clearTimeout(streamStopTimerRef.current);
+    streamStopTimerRef.current = window.setTimeout(() => {
+      if (streamClientRef.current === client) {
+        client.stop();
+        streamClientRef.current = null;
+        if (!streamFinalReceivedRef.current) {
+          streamStoppingRef.current = false;
+          setPartialText("");
+          setState("idle");
         }
       }
+      streamStopTimerRef.current = undefined;
     }, 5000);
   };
 
