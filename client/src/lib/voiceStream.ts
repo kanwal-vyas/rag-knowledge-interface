@@ -122,8 +122,9 @@ export class VoiceStreamClient {
       this.ts("T5: AudioWorklet connected (mic → worklet)");
 
       // 7. Open WebSocket to backend.
-      const wsOpenTime = performance.now();
-      this.ws = new WebSocket(`${WS_BASE}/voice/stream`);
+      const wsUrl = `${WS_BASE}/voice/stream`;
+      console.log(`[Latency] [${this._sessionId}] WebSocket URL: ${wsUrl}`);
+      this.ws = new WebSocket(wsUrl);
 
       this.ws.onopen = () => {
         this.ts("T8: WebSocket opened");
@@ -144,13 +145,17 @@ export class VoiceStreamClient {
         } catch { /* ignore parse errors */ }
       };
 
-      this.ws.onclose = () => {
-        this.ts("WebSocket closed");
+      this.ws.onclose = (e) => {
+        this.ts(`WebSocket closed code=${e.code} reason="${e.reason}"`);
         this.stop();
       };
 
-      this.ws.onerror = () => {
-        this.callbacks.onError?.("WebSocket connection failed", true);
+      this.ws.onerror = (e) => {
+        console.error(`[Latency] [${this._sessionId}] WebSocket error: URL=${wsUrl} readyState=${this.ws?.readyState}`);
+        this.callbacks.onError?.(
+          `WebSocket connection failed. URL: ${wsUrl}. Check that the backend is running and supports WebSocket upgrades.`,
+          true,
+        );
         this.stop();
       };
 

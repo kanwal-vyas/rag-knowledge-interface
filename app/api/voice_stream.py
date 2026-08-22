@@ -56,6 +56,12 @@ def _build_sarvam_ws_url(
 @router.websocket("/voice/stream")
 async def voice_stream(ws: WebSocket) -> None:
     """Streaming voice endpoint with full latency instrumentation."""
+    client = ws.client
+    logger.info(
+        "voice_stream_accepted",
+        client_host=client.host if client else None,
+        client_port=client.port if client else None,
+    )
     await ws.accept()
     settings = get_settings()
     api_key = settings.stt_api_key
@@ -114,13 +120,32 @@ async def voice_stream(ws: WebSocket) -> None:
 
         # Connect to Sarvam realtime WebSocket.
         t_ws_connect = time.perf_counter()
-        sarvam_ws = await websockets.asyncio.client.connect(
-            sarvam_url,
-            additional_headers={"API-SUBSCRIPTION-KEY": api_key},
-            open_timeout=10.0,
-        )
-        latency_ws_connect = (time.perf_counter() - t_ws_connect) * 1000
-        ts_ms(f"B3: Sarvam WS connected ({latency_ws_connect:.0f}ms)")
+        try:
+            sarvam_ws = await websockets.asyncio.client.connect(
+                sarvam_url,
+                additional_headers={"API-SUBSCRIPTION-KEY": api_key},
+                open_timeout=10.0,
+            )
+            latency_ws_connect = (time.perf_counter() - t_ws_connect) * 1000
+            ts_ms(f"B3: Sarvam WS connected ({latency_ws_connect:.0f}ms)")
+        except Exception as sarvam_err:
+            latency_ws_connect = (time.perf_counter() - t_ws_connect) * 1000
+            logger.error(
+                "voice_stream_sarvam_connect_failed",
+                session_id=session_id,
+                error_type=type(sarvam_err).__name__,
+                error=str(sarvam_err),
+                latency_ms=round(latency_ws_connect, 1),
+                url=sarvam_url,
+            )
+            with contextlib.suppress(Exception):
+                await ws.send_json({
+                    "event": "error",
+                    "message": f"Failed to connect to Sarvam STT: {sarvam_err}",
+                    "fatal": True,
+                })
+            await ws.close()
+            return
 
         # Send connected event back to browser.
         await ws.send_json({
