@@ -97,10 +97,12 @@ export default function Home() {
   const [diagResult, setDiagResult] = useState("");
   const [diagBusy, setDiagBusy] = useState(false);
   const [canPlay, setCanPlay] = useState(false);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
   const [micTestInfo, setMicTestInfo] = useState<string[]>([]);
   const [micTestStream, setMicTestStream] = useState<MediaStream | null>(null);
+  const [micRms, setMicRms] = useState(0);
   const micTestMonitorRef = useRef<HTMLAudioElement | null>(null);
+  const micAudioCtxRef = useRef<AudioContext | null>(null);
+  const micRmsIntervalRef = useRef<number | undefined>(undefined);
 
   useEffect(() => {
     getHealth().then((data) => setHealth(data.status === "ok" ? "online" : "degraded")).catch(() => setHealth("offline"));
@@ -142,13 +144,13 @@ export default function Home() {
         try { prevRec.requestData(); prevRec.stop(); } catch { /* already stopped */ }
       }
 
-      // Simplest possible mic acquisition — no constraints, no processing.
+      // Simplest possible mic acquisition - no constraints, no processing.
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
       // Log MediaStream diagnostics.
       const tracks = stream.getTracks();
       const audioTracks = stream.getAudioTracks();
-      console.log(`[Voice] ═══ MICROPHONE ═══`);
+      console.log(`[Voice] MICROPHONE`);
       console.log(`[Voice] tracks: ${tracks.length}, audioTracks: ${audioTracks.length}`);
       tracks.forEach((t, i) => {
         const s = t.getSettings();
@@ -156,7 +158,6 @@ export default function Home() {
         console.log(`[Voice]   settings: sampleRate=${s.sampleRate} channelCount=${s.channelCount} deviceId=${s.deviceId}`);
       });
       console.log(`[Voice] stream.active: ${stream.active}`);
-      console.log(`[Voice] ═══════════════════`);
 
       const recorder = new MediaRecorder(stream);
       console.log(`[Voice] recorder.mimeType: ${recorder.mimeType}`);
@@ -165,7 +166,7 @@ export default function Home() {
       chunksRef.current = [];
       const sessionId = ++sessionRef.current;
 
-      console.log(`[Voice] ─── SESSION ${sessionId} START ───`);
+      console.log(`[Voice] --- SESSION ${sessionId} START ---`);
 
       let chunkIndex = 0;
       recorder.ondataavailable = (event) => {
@@ -178,18 +179,15 @@ export default function Home() {
         }
       };
       recorder.onstop = () => {
-        // CRITICAL: Capture chunks and session immediately — do NOT read
+        // CRITICAL: Capture chunks and session immediately - do NOT read
         // chunksRef.current later, as a new session may have cleared it.
         const capturedChunks = [...chunksRef.current];
         const capturedSession = sessionId;
-        // Stop live mic monitor.
-        const mon = (window as any).__voiceMonitor;
-        if (mon) { mon.srcObject = null; delete (window as any).__voiceMonitor; }
         stream.getTracks().forEach((track) => track.stop());
         if (timerRef.current) window.clearInterval(timerRef.current);
         const wallMs = Date.now() - recordStartRef.current;
 
-        console.log(`[Voice] [session=${capturedSession}] ═══ RECORDING SUMMARY ═══`);
+        console.log(`[Voice] [session=${capturedSession}] RECORDING SUMMARY`);
         console.log(`[Voice] [session=${capturedSession}] recorder.mimeType: ${recorder.mimeType}`);
         console.log(`[Voice] [session=${capturedSession}] captured chunks: ${capturedChunks.length}`);
         console.log(`[Voice] [session=${capturedSession}] chunk sizes: [${capturedChunks.map(c => c.size).join(", ")}]`);
@@ -197,40 +195,28 @@ export default function Home() {
 
         // If a newer recording has already started, discard this one.
         if (capturedSession !== sessionRef.current) {
-          console.log(`[Voice] [session=${capturedSession}] STALE — discarding (current session: ${sessionRef.current})`);
+          console.log(`[Voice] [session=${capturedSession}] STALE - discarding (current session: ${sessionRef.current})`);
           return;
         }
 
         const blob = new Blob(capturedChunks, { type: recorder.mimeType || "audio/webm" });
         console.log(`[Voice] [session=${capturedSession}] blob.size: ${blob.size} bytes`);
         console.log(`[Voice] [session=${capturedSession}] blob.type: ${blob.type}`);
-        console.log(`[Voice] [session=${capturedSession}] ═══════════════════════`);
 
         if (!blob.size) {
-          console.log(`[Voice] [session=${capturedSession}] EMPTY BLOB — no audio captured`);
+          console.log(`[Voice] [session=${capturedSession}] EMPTY BLOB - no audio captured`);
           setError("No audio was captured. Please try again."); setState("error");
           return;
         }
-
-        // DIAGNOSTIC: Auto-download the exact blob for /diagnose/audio testing.
-        const diagLink = document.createElement("a");
-        diagLink.href = URL.createObjectURL(blob);
-        diagLink.download = `recording_s${capturedSession}_${blob.size}b.webm`;
-        document.body.appendChild(diagLink);
-        diagLink.click();
-        document.body.removeChild(diagLink);
-        URL.revokeObjectURL(diagLink.href);
-        console.log(`[Voice] [session=${capturedSession}] DIAGNOSTIC: downloaded ${diagLink.download}`);
 
         // Store blob ref for playback and /diagnose/audio.
         lastBlobRef.current = blob;
         if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current);
         audioUrlRef.current = URL.createObjectURL(blob);
         setCanPlay(true);
-        console.log(`[Voice] [session=${capturedSession}] PLAYBACK URL: ${audioUrlRef.current}`);
 
         setState("processing");
-        // Fire-and-forget async processing — session guard prevents stale results.
+        // Fire-and-forget async processing - session guard prevents stale results.
         processVoiceBlob(blob, capturedSession, capturedChunks.length, wallMs);
       };
 
@@ -251,7 +237,7 @@ export default function Home() {
       const voiceResult = await queryVoice(blob, voiceLang || undefined, sessionId);
       // Guard: only apply results if this session is still current.
       if (sessionId !== sessionRef.current) {
-        console.log(`[Voice] [session=${sessionId}] result discarded — session superseded`);
+        console.log(`[Voice] [session=${sessionId}] result discarded - session superseded`);
         return;
       }
       console.log(`[Voice] [session=${sessionId}] result: transcript="${voiceResult.transcript}"`);
@@ -284,57 +270,10 @@ export default function Home() {
     }
   };
 
-  const testMic = async () => {
-    const lines: string[] = [];
-    const push = (s: string) => { lines.push(s); console.log(`[MicTest] ${s}`); };
-    push(`navigator.mediaDevices exists: ${!!navigator.mediaDevices}`);
-    push(`getUserMedia exists: ${!!navigator.mediaDevices?.getUserMedia}`);
-    // Stop previous test stream.
-    if (micTestStream) {
-      micTestStream.getTracks().forEach(t => t.stop());
-      setMicTestStream(null);
-    }
-    if (micTestMonitorRef.current) {
-      micTestMonitorRef.current.srcObject = null;
-      micTestMonitorRef.current = null;
-    }
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const tracks = stream.getAudioTracks();
-      push(`getUserMedia succeeded: true`);
-      push(`audio tracks: ${tracks.length}`);
-      tracks.forEach((t, i) => {
-        push(`  track[${i}]: kind=${t.kind} label="${t.label}" readyState=${t.readyState} enabled=${t.enabled} muted=${t.muted}`);
-        const s = t.getSettings();
-        push(`  settings: sampleRate=${s.sampleRate} channelCount=${s.channelCount} deviceId=${s.deviceId} groupId=${s.groupId}`);
-      });
-      push(`stream.active: ${stream.active}`);
-      // Enumerate all audio input devices.
-      const devices = await navigator.mediaDevices.enumerateDevices();
-      const audioInputs = devices.filter(d => d.kind === 'audioinput');
-      push(`\navailable audio input devices (${audioInputs.length}):`);
-      audioInputs.forEach((d, i) => {
-        push(`  [${i}] label="${d.label}" deviceId=${d.deviceId.slice(0,16)}... groupId=${d.groupId.slice(0,16)}...`);
-      });
-      // Attach to visible audio element for live monitoring.
-      setMicTestStream(stream);
-      setMicTestInfo([...lines]);
-      // Play through visible audio element.
-      setTimeout(() => {
-        const el = micTestMonitorRef.current;
-        if (el) {
-          el.srcObject = stream;
-          el.play().then(() => push('Live monitor: PLAYING — you should hear yourself')).catch(e => push(`Live monitor error: ${e.message}`));
-        }
-      }, 100);
-    } catch (e) {
-      push(`getUserMedia FAILED: ${e}`);
-      push(`getUserMedia succeeded: false`);
-      setMicTestInfo([...lines]);
-    }
-  };
-
+  // ── MIC TEST: Web Audio RMS + live playback ──
   const stopMicTest = () => {
+    if (micRmsIntervalRef.current) { clearInterval(micRmsIntervalRef.current); micRmsIntervalRef.current = undefined; }
+    if (micAudioCtxRef.current) { micAudioCtxRef.current.close().catch(() => {}); micAudioCtxRef.current = null; }
     if (micTestStream) {
       micTestStream.getTracks().forEach(t => t.stop());
       setMicTestStream(null);
@@ -343,6 +282,94 @@ export default function Home() {
       micTestMonitorRef.current.srcObject = null;
     }
     setMicTestInfo([]);
+    setMicRms(0);
+  };
+
+  const testMic = async () => {
+    stopMicTest();
+    const lines: string[] = [];
+    const push = (s: string) => { lines.push(s); console.log(`[MicTest] ${s}`); };
+
+    push("=== TEST 1: MediaStream ===");
+    push(`navigator.mediaDevices: ${!!navigator.mediaDevices}`);
+    push(`getUserMedia: ${!!navigator.mediaDevices?.getUserMedia}`);
+
+    try {
+      // Simplest possible request - no constraints.
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const tracks = stream.getAudioTracks();
+      push(`getUserMedia: OK`);
+      push(`audio tracks: ${tracks.length}`);
+      tracks.forEach((t, i) => {
+        const s = t.getSettings();
+        push(`track[${i}]: kind=${t.kind}`);
+        push(`  label: "${t.label}"`);
+        push(`  readyState: ${t.readyState}`);
+        push(`  enabled: ${t.enabled}`);
+        push(`  muted: ${t.muted}`);
+        push(`  settings: ${JSON.stringify(s)}`);
+      });
+      push(`stream.active: ${stream.active}`);
+
+      // Enumerate devices.
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const audioInputs = devices.filter(d => d.kind === "audioinput");
+      push(`\navailable audioinput devices: ${audioInputs.length}`);
+      audioInputs.forEach((d, i) => {
+        push(`  [${i}] "${d.label}" id=${d.deviceId.slice(0, 20)}...`);
+      });
+
+      setMicTestStream(stream);
+      setMicTestInfo([...lines]);
+
+      // TEST 2: Web Audio API RMS signal analysis.
+      push("\n=== TEST 2: Web Audio RMS ===");
+      const ctx = new AudioContext();
+      micAudioCtxRef.current = ctx;
+      const source = ctx.createMediaStreamSource(stream);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 2048;
+      source.connect(analyser);
+      const floatData = new Float32Array(analyser.fftSize);
+      push(`AudioContext sampleRate: ${ctx.sampleRate}`);
+      push(`Analyser fftSize: ${analyser.fftSize}`);
+      push("Speak now - RMS updates every 200ms below...");
+      micRmsIntervalRef.current = window.setInterval(() => {
+        analyser.getFloatTimeDomainData(floatData);
+        let sum = 0;
+        for (let i = 0; i < floatData.length; i++) sum += floatData[i] * floatData[i];
+        const rms = Math.sqrt(sum / floatData.length);
+        setMicRms(rms);
+      }, 200);
+      setMicTestInfo([...lines]);
+
+      // TEST 3: Audio element playback.
+      push("\n=== TEST 3: Audio playback ===");
+      const audio = new Audio();
+      audio.srcObject = stream;
+      audio.autoplay = true;
+      audio.muted = false;
+      audio.volume = 1.0;
+      await audio.play().catch((e: any) => {
+        push(`Audio.play() FAILED: ${e.name}: ${e.message}`);
+        push(`Try: chrome://settings/content/sound - ensure not blocked`);
+      });
+      push(`Audio element: ${audio.paused ? "PAUSED" : "PLAYING"}`);
+      push(`You should hear yourself NOW through speakers/headphones`);
+      micTestMonitorRef.current = audio;
+      setMicTestInfo([...lines]);
+
+    } catch (e: any) {
+      push(`\ngetUserMedia FAILED`);
+      push(`error.name: ${e.name}`);
+      push(`error.message: ${e.message}`);
+      if (e.name === "NotAllowedError") push("-> Microphone permission DENIED. Check: chrome://settings/content/microphone");
+      else if (e.name === "NotFoundError") push("-> No microphone found. Check: chrome://settings/content/microphone");
+      else if (e.name === "NotReadableError") push("-> Microphone in use by another app (Teams, Zoom, etc.)");
+      else if (e.name === "OverconstrainedError") push("-> Constraints cannot be satisfied");
+      else if (e.name === "SecurityError") push("-> Must be served over HTTPS or localhost");
+      setMicTestInfo([...lines]);
+    }
   };
 
   const stopRecording = () => {
@@ -398,13 +425,13 @@ export default function Home() {
                 </div>
                 <button className="send-button" onClick={submitText} disabled={!query.trim() || isBusy || state === "recording"}><span>{isBusy ? "Processing" : "Ask"}</span>{isBusy ? <Activity size={17} className="spin" /> : <Send size={17} />}</button>
               </div>
-              {state === "recording" && <div className="recording-note"><span className="live-dot" /> Recording in progress. Tap stop when you’re finished.</div>}
+              {state === "recording" && <div className="recording-note"><span className="live-dot" /> Recording in progress. Tap stop when you're finished.</div>}
               {isBusy && <div className="processing-line"><span /> <b>Retrieving knowledge and generating answer</b></div>}
             </div>
             <div style={{ marginTop: "0.75rem" }}>
               {canPlay && audioUrlRef.current && (
                 <button onClick={() => { const a = new Audio(audioUrlRef.current!); a.play().catch(() => {}); }} style={{ fontSize: "0.7rem", padding: "4px 10px", background: "rgba(120,200,120,0.15)", border: "1px solid rgba(120,200,120,0.3)", borderRadius: "4px", color: "#8c8", cursor: "pointer", marginRight: "6px" }}>
-                  ▶ Play last recording
+                  Play last recording
                 </button>
               )}
               <button onClick={runDiag} disabled={diagBusy || !lastBlobRef.current} style={{ fontSize: "0.7rem", padding: "4px 10px", background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "4px", color: "var(--fg-secondary)", cursor: lastBlobRef.current ? "pointer" : "not-allowed" }}>
@@ -413,9 +440,13 @@ export default function Home() {
               {diagResult && <pre style={{ marginTop: "0.5rem", fontSize: "0.65rem", maxHeight: "300px", overflow: "auto", padding: "8px", background: "rgba(0,0,0,0.3)", borderRadius: "4px", whiteSpace: "pre-wrap", wordBreak: "break-all", color: "var(--fg-secondary)" }}>{diagResult}</pre>}
             </div>
 
+            {/* MIC TEST PANEL */}
             <div style={{ marginTop: "1rem", padding: "10px", border: "1px solid rgba(255,100,100,0.3)", borderRadius: "6px", background: "rgba(255,100,100,0.05)" }}>
-              <div style={{ fontSize: "0.75rem", fontWeight: 600, color: "#f88", marginBottom: "6px" }}>MIC TEST</div>
-              <div style={{ display: "flex", gap: "6px", marginBottom: "8px" }}>
+              <div style={{ fontSize: "0.75rem", fontWeight: 600, color: "#f88", marginBottom: "6px" }}>MIC TEST (diagnostic)</div>
+              <div style={{ fontSize: "0.6rem", color: "#f88", marginBottom: "6px", opacity: 0.7 }}>
+                Check: chrome://settings/content/microphone and chrome://settings/media-engagement
+              </div>
+              <div style={{ display: "flex", gap: "6px", marginBottom: "8px", alignItems: "center" }}>
                 {!micTestStream ? (
                   <button onClick={testMic} style={{ fontSize: "0.7rem", padding: "4px 10px", background: "rgba(255,100,100,0.15)", border: "1px solid rgba(255,100,100,0.3)", borderRadius: "4px", color: "#f88", cursor: "pointer" }}>
                     Test Microphone
@@ -425,13 +456,18 @@ export default function Home() {
                     Stop Mic Test
                   </button>
                 )}
+                {micTestStream && (
+                  <span style={{ fontSize: "0.7rem", fontFamily: "monospace", color: micRms > 0.01 ? "#8c8" : "#f88" }}>
+                    MIC SIGNAL RMS: {micRms.toFixed(4)} {micRms > 0.01 ? "(ACTIVE)" : "(SILENT)"}
+                  </span>
+                )}
               </div>
               {micTestInfo.length > 0 && (
-                <div style={{ fontSize: "0.65rem", fontFamily: "monospace", lineHeight: 1.6, color: "var(--fg-secondary)", whiteSpace: "pre-wrap" }}>
-                  {micTestInfo.join('\n')}
+                <div style={{ fontSize: "0.6rem", fontFamily: "monospace", lineHeight: 1.5, color: "var(--fg-secondary)", whiteSpace: "pre-wrap", maxHeight: "250px", overflow: "auto" }}>
+                  {micTestInfo.join("\n")}
                 </div>
               )}
-              <audio ref={micTestMonitorRef} style={{ display: 'block', marginTop: '6px', width: '100%', height: '32px' }} controls muted={false} />
+              <audio ref={micTestMonitorRef} style={{ display: "block", marginTop: "6px", width: "100%", height: "32px" }} controls />
             </div>
 
             <div className="examples"><div className="section-label"><Sparkles size={14} /> TRY AN EXAMPLE</div>{examples.map((example) => <button key={example} onClick={() => { setQuery(example); setState("idle"); }}>{example}<ArrowUpRight size={14} /></button>)}</div>
@@ -444,13 +480,13 @@ export default function Home() {
               return <div className="answer-topline"><span className="eyebrow"><span className="eyebrow-line" /> OUTPUT / 02</span><span className="answer-count">{statusText}</span></div>;
             })()}
             {!result && state !== "error" && <div className="empty-answer"><div className="empty-art"><Radio size={25} /><span /></div><span className="empty-index">NO QUERY IN FOCUS</span><p>The answer canvas is ready.</p><small>Use the microphone for a hands-free query,<br />or send a question from the input rail.</small></div>}
-            {state === "processing" && !result && <div className="loading-answer"><div className="loading-bars"><i /><i /><i /><i /><i /></div><p>Searching the knowledge base and preparing a grounded response</p><span>Frontend status · backend pipeline is processing</span></div>}
-            {state === "error" && <div className="error-answer"><div className="error-icon"><X size={20} /></div><span className="empty-index">COULD NOT COMPLETE</span><h2>Let’s try that again.</h2><p>{error}</p><button onClick={reset}><RotateCcw size={15} /> Reset the question</button></div>}
+            {state === "processing" && !result && <div className="loading-answer"><div className="loading-bars"><i /><i /><i /><i /><i /></div><p>Searching the knowledge base and preparing a grounded response</p><span>Frontend status - backend pipeline is processing</span></div>}
+            {state === "error" && <div className="error-answer"><div className="error-icon"><X size={20} /></div><span className="empty-index">COULD NOT COMPLETE</span><h2>Let's try that again.</h2><p>{error}</p><button onClick={reset}><RotateCcw size={15} /> Reset the question</button></div>}
             {result && (() => {
               const genError = hasGenerationError(result.latency);
               return (
                 <div className="result-card fade-in">
-                  {result.transcript && <div className="transcript-block"><div className="result-label"><Volume2 size={14} /> TRANSCRIPT</div><p>“{result.transcript}”</p><div className="result-meta"><span><Languages size={13} /> {result.detected_language || "Language not reported"}</span></div></div>}
+                  {result.transcript && <div className="transcript-block"><div className="result-label"><Volume2 size={14} /> TRANSCRIPT</div><p>"{result.transcript}"</p><div className="result-meta"><span><Languages size={13} /> {result.detected_language || "Language not reported"}</span></div></div>}
                   <div className="answer-block">
                     <div className="result-label"><span className={`grounded-dot ${result.grounded ? "good" : "muted"}`} /> ANSWER</div>
                     {genError ? (
@@ -476,7 +512,7 @@ export default function Home() {
             })()}
           </section>
         </div>
-        <footer className="footer"><span>HH GOA 2026 / TASK 02</span><span>RETRIEVAL · GENERATION · GROUNDING</span><span>Built for clear answers</span></footer>
+        <footer className="footer"><span>HH GOA 2026 / TASK 02</span><span>RETRIEVAL - GENERATION - GROUNDING</span><span>Built for clear answers</span></footer>
       </section>
     </main>
   );
