@@ -139,17 +139,50 @@ export default function Home() {
         try { prevRec.requestData(); prevRec.stop(); } catch { /* already stopped */ }
       }
 
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // Request microphone with explicit constraints to avoid Chrome
+      // silently applying aggressive noise suppression / echo cancellation
+      // that can mute the actual speech signal.
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+          channelCount: 1,
+          sampleRate: 48000,
+        },
+      });
 
       // Log MediaStream diagnostics.
       const tracks = stream.getTracks();
+      const audioTracks = stream.getAudioTracks();
       console.log(`[Voice] ═══ MICROPHONE ═══`);
-      console.log(`[Voice] tracks: ${tracks.length}`);
-      tracks.forEach((t, i) => console.log(`[Voice]   track[${i}]: kind=${t.kind} label=${t.label} readyState=${t.readyState} enabled=${t.enabled} muted=${t.muted}`));
+      console.log(`[Voice] tracks: ${tracks.length}, audioTracks: ${audioTracks.length}`);
+      tracks.forEach((t, i) => {
+        const s = t.getSettings();
+        console.log(`[Voice]   track[${i}]: kind=${t.kind} label=${t.label} readyState=${t.readyState} enabled=${t.enabled} muted=${t.muted}`);
+        console.log(`[Voice]   settings: sampleRate=${s.sampleRate} channelCount=${s.channelCount} deviceId=${s.deviceId?.slice(0,12)}...`);
+      });
       console.log(`[Voice] stream.active: ${stream.active}`);
       console.log(`[Voice] ═══════════════════`);
 
-      const recorder = new MediaRecorder(stream);
+      const recorder = new MediaRecorder(stream, {
+        mimeType: 'audio/webm;codecs=opus',
+        audioBitsPerSecond: 128000,
+      });
+      console.log(`[Voice] recorder.mimeType: ${recorder.mimeType}`);
+
+      // Live mic monitor: hidden audio element plays the live stream
+      // so user can hear themselves and verify mic is capturing audio.
+      const monitor = document.createElement('audio');
+      monitor.srcObject = stream;
+      monitor.muted = false;
+      monitor.play().then(() => {
+        console.log('[Voice] LIVE MIC MONITOR: active — you should hear yourself');
+      }).catch((e) => {
+        console.warn('[Voice] LIVE MIC MONITOR: autoplay blocked', e.message);
+      });
+      // Store for cleanup.
+      (window as any).__voiceMonitor = monitor;
 
       // Clear old chunks and increment session BEFORE registering handlers.
       chunksRef.current = [];
@@ -172,6 +205,9 @@ export default function Home() {
         // chunksRef.current later, as a new session may have cleared it.
         const capturedChunks = [...chunksRef.current];
         const capturedSession = sessionId;
+        // Stop live mic monitor.
+        const mon = (window as any).__voiceMonitor;
+        if (mon) { mon.srcObject = null; delete (window as any).__voiceMonitor; }
         stream.getTracks().forEach((track) => track.stop());
         if (timerRef.current) window.clearInterval(timerRef.current);
         const wallMs = Date.now() - recordStartRef.current;
