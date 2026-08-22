@@ -120,13 +120,27 @@ export default function Home() {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const recorder = new MediaRecorder(stream);
       chunksRef.current = [];
-      recorder.ondataavailable = (event) => { if (event.data.size) chunksRef.current.push(event.data); };
+      let chunkIndex = 0;
+      recorder.ondataavailable = (event) => {
+        if (event.data.size) {
+          chunksRef.current.push(event.data);
+          chunkIndex++;
+          console.log(`[Voice] chunk #${chunkIndex}: ${event.data.size} bytes (total chunks: ${chunksRef.current.length})`);
+        }
+      };
       recorder.onstop = async () => {
         stream.getTracks().forEach((track) => track.stop());
         if (timerRef.current) window.clearInterval(timerRef.current);
-        const duration = ((Date.now() - recordStartRef.current) / 1000).toFixed(1);
+        const wallMs = Date.now() - recordStartRef.current;
         const blob = new Blob(chunksRef.current, { type: recorder.mimeType || "audio/webm" });
-        console.log(`[Voice] recording stopped — chunks: ${chunksRef.current.length}, size: ${blob.size} bytes, duration: ${duration}s, type: ${blob.type}`);
+        console.log(`[Voice] ═══ RECORDING SUMMARY ═══`);
+        console.log(`[Voice] recorder.mimeType: ${recorder.mimeType}`);
+        console.log(`[Voice] blob.type: ${blob.type}`);
+        console.log(`[Voice] chunk count: ${chunksRef.current.length}`);
+        console.log(`[Voice] chunk sizes: [${chunksRef.current.map(c => c.size).join(", ")}]`);
+        console.log(`[Voice] blob.size: ${blob.size} bytes`);
+        console.log(`[Voice] wall-clock duration: ${wallMs}ms`);
+        console.log(`[Voice] ═══════════════════════`);
         if (!blob.size) { setError("No audio was captured. Please try again."); setState("error"); return; }
         setState("processing");
         try {

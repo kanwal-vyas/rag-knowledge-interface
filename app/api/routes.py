@@ -366,6 +366,8 @@ async def voice_query(
         byte_length=len(audio_bytes),
         content_type=file.content_type,
         filename=file.filename,
+        first_16_hex=audio_bytes[:16].hex() if len(audio_bytes) >= 16 else audio_bytes.hex(),
+        last_8_hex=audio_bytes[-8:].hex() if len(audio_bytes) >= 8 else audio_bytes.hex(),
     )
     if not audio_bytes:
         return VoiceQueryResponse(
@@ -385,6 +387,32 @@ async def voice_query(
     elif file.filename and "." in file.filename:
         raw_format = file.filename
     audio_format = _normalize_audio_format(raw_format)
+
+    # ── WebM structural inspection ──
+    if audio_format == "webm":
+        from app.services.webm_inspect import inspect_webm
+        webm_info = inspect_webm(audio_bytes)
+        tracks_info = []
+        for t in webm_info.tracks:
+            tracks_info.append({"codec": t.codec_id, "rate": t.sample_rate, "ch": t.channels})
+        logger.info(
+            "voice_webm_inspect",
+            valid=webm_info.valid,
+            doctype=webm_info.doctype,
+            duration_ms=webm_info.duration_ms,
+            timecode_scale=webm_info.timecode_scale,
+            total_bytes=webm_info.total_bytes,
+            tracks=tracks_info,
+            first_16_hex=webm_info.first_bytes_hex,
+            error=webm_info.error,
+        )
+
+    logger.info(
+        "voice_audio_normalized",
+        raw_format=raw_format,
+        audio_format=audio_format,
+        byte_length=len(audio_bytes),
+    )
 
     try:
         pipeline = _get_pipeline()

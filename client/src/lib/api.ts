@@ -78,14 +78,27 @@ export async function queryVoice(blob: Blob, language?: string): Promise<VoiceQu
   form.append("lang", language || "");
   form.append("retrieval_mode", "cross_lingual");
   form.append("top_k", "10");
-  console.log(`[Voice] uploading: ${blob.size} bytes, type: ${blob.type}, lang: "${language || ""}"`);
+  console.log(`[Voice] ═══ UPLOAD ═══`);
+  console.log(`[Voice] blob.size: ${blob.size} bytes`);
+  console.log(`[Voice] blob.type: ${blob.type}`);
+  console.log(`[Voice] filename: ${extension}`);
+  console.log(`[Voice] lang: "${language || ""}"`);
+  console.log(`[Voice] API_URL: ${API_BASE_URL}/voice/query`);
+  console.log(`[Voice] ════════════════`);
 
   const response = await fetch(`${API_BASE_URL}/voice/query`, {
     method: "POST",
     body: form,
   });
   const result = await parseResponse<VoiceQueryResponse>(response);
-  console.log(`[Voice] response — transcript: "${result.transcript}", lang: ${result.detected_language}`);
+  console.log(`[Voice] ═══ RESPONSE ═══`);
+  console.log(`[Voice] transcript: "${result.transcript}"`);
+  console.log(`[Voice] detected_language: ${result.detected_language}`);
+  console.log(`[Voice] answer: "${result.answer}"`);
+  console.log(`[Voice] grounded: ${result.grounded}`);
+  console.log(`[Voice] stt_ms: ${result.latency.stt_ms}`);
+  console.log(`[Voice] total_ms: ${result.latency.total_ms}`);
+  console.log(`[Voice] ════════════════`);
   return result;
 }
 

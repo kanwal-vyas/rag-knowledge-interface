@@ -217,6 +217,10 @@ class SarvamSTTProvider(STTProvider):
             "sarvam_request_sending",
             audio_bytes=len(audio_bytes),
             audio_format=audio_format,
+            filename=files["file"][0],
+            content_type=files["file"][2],
+            first_16_hex=audio_bytes[:16].hex() if len(audio_bytes) >= 16 else audio_bytes.hex(),
+            last_8_hex=audio_bytes[-8:].hex() if len(audio_bytes) >= 8 else audio_bytes.hex(),
             model=self.model,
             mode=self.mode,
             language_code=data.get("language_code"),
@@ -247,6 +251,7 @@ class SarvamSTTProvider(STTProvider):
                     transcript_length=len(transcript),
                     request_id=request_id,
                     elapsed_ms=round(elapsed_ms, 1),
+                    response_keys=list(result.keys()),
                 )
 
                 return TranscriptionResult(
