@@ -18,15 +18,6 @@ export type QueryResponse = {
   latency: Latency;
 };
 
-export type VoiceQueryResponse = {
-  transcript: string;
-  detected_language: string;
-  answer: string;
-  grounded: boolean;
-  request_id: string;
-  latency: Latency;
-};
-
 export type HealthResponse = {
   status: string;
   environment: string;
@@ -69,38 +60,6 @@ export async function queryText(query_text: string): Promise<QueryResponse> {
     body: JSON.stringify({ query_text, lang, retrieval_mode: "cross_lingual", top_k: 10 }),
   });
   return parseResponse<QueryResponse>(response);
-}
-
-export async function queryVoice(blob: Blob, language?: string, sessionId?: number): Promise<VoiceQueryResponse> {
-  const form = new FormData();
-  const extension = blob.type.includes("webm") ? "question.webm" : "question.wav";
-  form.append("file", blob, extension);
-  form.append("lang", language || "");
-  form.append("retrieval_mode", "cross_lingual");
-  form.append("top_k", "10");
-  const sid = sessionId != null ? `[session=${sessionId}] ` : "";
-  console.log(`[Voice] ${sid}══ UPLOAD ══`);
-  console.log(`[Voice] ${sid}blob.size: ${blob.size} bytes`);
-  console.log(`[Voice] ${sid}blob.type: ${blob.type}`);
-  console.log(`[Voice] ${sid}filename: ${extension}`);
-  console.log(`[Voice] ${sid}lang: "${language || ""}"`);
-  console.log(`[Voice] ${sid}API_URL: ${API_BASE_URL}/voice/query`);
-  console.log(`[Voice] ${sid}══════════════`);
-
-  const response = await fetch(`${API_BASE_URL}/voice/query`, {
-    method: "POST",
-    body: form,
-  });
-  const result = await parseResponse<VoiceQueryResponse>(response);
-  console.log(`[Voice] ${sid}══ RESPONSE ══`);
-  console.log(`[Voice] ${sid}transcript: "${result.transcript}"`);
-  console.log(`[Voice] ${sid}detected_language: ${result.detected_language}`);
-  console.log(`[Voice] ${sid}answer: "${result.answer}"`);
-  console.log(`[Voice] ${sid}grounded: ${result.grounded}`);
-  console.log(`[Voice] ${sid}stt_ms: ${result.latency.stt_ms}`);
-  console.log(`[Voice] ${sid}total_ms: ${result.latency.total_ms}`);
-  console.log(`[Voice] ${sid}══════════════`);
-  return result;
 }
 
 export async function getHealth(): Promise<HealthResponse> {
