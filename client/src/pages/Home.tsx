@@ -91,10 +91,18 @@ export default function Home() {
   const chunksRef = useRef<Blob[]>([]);
   const timerRef = useRef<number | undefined>(undefined);
   const recordStartRef = useRef<number>(0);
+  const sessionRef = useRef<number>(0);
 
   useEffect(() => {
     getHealth().then((data) => setHealth(data.status === "ok" ? "online" : "degraded")).catch(() => setHealth("offline"));
-    return () => { if (timerRef.current) window.clearInterval(timerRef.current); mediaRecorderRef.current?.stop(); };
+    return () => {
+      sessionRef.current++; // Invalidate any in-flight recording session.
+      if (timerRef.current) window.clearInterval(timerRef.current);
+      const rec = mediaRecorderRef.current;
+      if (rec && rec.state !== "inactive") {
+        try { rec.stop(); } catch { /* already stopped */ }
+      }
+    };
   }, []);
 
   const submitText = async () => {
@@ -117,52 +125,108 @@ export default function Home() {
       setError("Voice capture is not supported in this browser. Try a current Chrome, Edge, or Safari browser."); setState("error"); return;
     }
     try {
+      // Stop any previous recorder cleanly before starting a new one.
+      const prevRec = mediaRecorderRef.current;
+      if (prevRec && prevRec.state !== "inactive") {
+        try { prevRec.requestData(); prevRec.stop(); } catch { /* already stopped */ }
+      }
+
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const recorder = new MediaRecorder(stream);
+
+      // Clear old chunks and increment session BEFORE registering handlers.
       chunksRef.current = [];
+      const sessionId = ++sessionRef.current;
+
+      console.log(`[Voice] ─── SESSION ${sessionId} START ───`);
+
       let chunkIndex = 0;
       recorder.ondataavailable = (event) => {
+        // Guard: only accept chunks from the current session.
+        if (sessionId !== sessionRef.current) return;
         if (event.data.size) {
           chunksRef.current.push(event.data);
           chunkIndex++;
-          console.log(`[Voice] chunk #${chunkIndex}: ${event.data.size} bytes (total chunks: ${chunksRef.current.length})`);
+          console.log(`[Voice] [session=${sessionId}] chunk #${chunkIndex}: ${event.data.size} bytes (total: ${chunksRef.current.length})`);
         }
       };
-      recorder.onstop = async () => {
+      recorder.onstop = () => {
+        // CRITICAL: Capture chunks and session immediately — do NOT read
+        // chunksRef.current later, as a new session may have cleared it.
+        const capturedChunks = [...chunksRef.current];
+        const capturedSession = sessionId;
         stream.getTracks().forEach((track) => track.stop());
         if (timerRef.current) window.clearInterval(timerRef.current);
         const wallMs = Date.now() - recordStartRef.current;
-        const blob = new Blob(chunksRef.current, { type: recorder.mimeType || "audio/webm" });
-        console.log(`[Voice] ═══ RECORDING SUMMARY ═══`);
-        console.log(`[Voice] recorder.mimeType: ${recorder.mimeType}`);
-        console.log(`[Voice] blob.type: ${blob.type}`);
-        console.log(`[Voice] chunk count: ${chunksRef.current.length}`);
-        console.log(`[Voice] chunk sizes: [${chunksRef.current.map(c => c.size).join(", ")}]`);
-        console.log(`[Voice] blob.size: ${blob.size} bytes`);
-        console.log(`[Voice] wall-clock duration: ${wallMs}ms`);
-        console.log(`[Voice] ═══════════════════════`);
-        if (!blob.size) { setError("No audio was captured. Please try again."); setState("error"); return; }
-        setState("processing");
-        try {
-          const voiceResult = await queryVoice(blob, voiceLang || undefined);
-          setResult(voiceResult); setQuery(voiceResult.transcript || ""); setState("complete");
-        } catch (err) {
-          setError(err instanceof Error ? err.message : "Voice processing failed. Please try text instead."); setState("error");
+
+        console.log(`[Voice] [session=${capturedSession}] ═══ RECORDING SUMMARY ═══`);
+        console.log(`[Voice] [session=${capturedSession}] recorder.mimeType: ${recorder.mimeType}`);
+        console.log(`[Voice] [session=${capturedSession}] captured chunks: ${capturedChunks.length}`);
+        console.log(`[Voice] [session=${capturedSession}] chunk sizes: [${capturedChunks.map(c => c.size).join(", ")}]`);
+        console.log(`[Voice] [session=${capturedSession}] wall-clock duration: ${wallMs}ms`);
+
+        // If a newer recording has already started, discard this one.
+        if (capturedSession !== sessionRef.current) {
+          console.log(`[Voice] [session=${capturedSession}] STALE — discarding (current session: ${sessionRef.current})`);
+          return;
         }
+
+        const blob = new Blob(capturedChunks, { type: recorder.mimeType || "audio/webm" });
+        console.log(`[Voice] [session=${capturedSession}] blob.size: ${blob.size} bytes`);
+        console.log(`[Voice] [session=${capturedSession}] blob.type: ${blob.type}`);
+        console.log(`[Voice] [session=${capturedSession}] ═══════════════════════`);
+
+        if (!blob.size) {
+          console.log(`[Voice] [session=${capturedSession}] EMPTY BLOB — no audio captured`);
+          setError("No audio was captured. Please try again."); setState("error");
+          return;
+        }
+        setState("processing");
+        // Fire-and-forget async processing — session guard prevents stale results.
+        processVoiceBlob(blob, capturedSession, capturedChunks.length, wallMs);
       };
+
       recordStartRef.current = Date.now();
-      recorder.start(); mediaRecorderRef.current = recorder; setRecordSeconds(0); setState("recording");
+      recorder.start();
+      mediaRecorderRef.current = recorder;
+      setRecordSeconds(0);
+      setState("recording");
       timerRef.current = window.setInterval(() => setRecordSeconds((value) => value + 1), 1000);
     } catch {
       setError("Microphone access was denied. Allow microphone access in your browser and try again."); setState("error");
     }
   };
 
+  const processVoiceBlob = async (blob: Blob, sessionId: number, chunkCount: number, wallMs: number) => {
+    try {
+      console.log(`[Voice] [session=${sessionId}] uploading ${blob.size} bytes (${chunkCount} chunks, ${wallMs}ms)`);
+      const voiceResult = await queryVoice(blob, voiceLang || undefined, sessionId);
+      // Guard: only apply results if this session is still current.
+      if (sessionId !== sessionRef.current) {
+        console.log(`[Voice] [session=${sessionId}] result discarded — session superseded`);
+        return;
+      }
+      console.log(`[Voice] [session=${sessionId}] result: transcript="${voiceResult.transcript}"`);
+      setResult(voiceResult);
+      setQuery(voiceResult.transcript || "");
+      setState("complete");
+    } catch (err) {
+      if (sessionId !== sessionRef.current) return;
+      console.log(`[Voice] [session=${sessionId}] error: ${err}`);
+      setError(err instanceof Error ? err.message : "Voice processing failed. Please try text instead.");
+      setState("error");
+    }
+  };
+
   const stopRecording = () => {
     const rec = mediaRecorderRef.current;
-    if (rec && rec.state === "recording") {
-      rec.requestData();
-      rec.stop();
+    if (rec && rec.state !== "inactive") {
+      try {
+        rec.requestData();
+        rec.stop();
+      } catch {
+        // Recorder may already be stopped.
+      }
     }
   };
   const reset = () => { setQuery(""); setResult(null); setError(""); setState("idle"); setRecordSeconds(0); setTimeout(() => textareaRef.current?.focus(), 0); };
