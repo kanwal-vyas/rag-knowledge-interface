@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api.routes import router
+from app.api.voice_stream import router as voice_stream_router
 from app.core.config import get_settings
 from app.core.errors import PipelineError
 
@@ -60,3 +61,4 @@ app.add_middleware(
 )
 
 app.include_router(router)
+app.include_router(voice_stream_router)

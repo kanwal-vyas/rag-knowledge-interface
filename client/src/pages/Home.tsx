@@ -21,6 +21,7 @@ import {
   X,
 } from "lucide-react";
 import { getHealth, queryText, queryVoice, type Latency, type QueryResponse, type VoiceQueryResponse } from "@/lib/api";
+import { VoiceStreamClient } from "@/lib/voiceStream";
 
 const examples = [
   "What is the purpose of the European Union?",
@@ -103,6 +104,9 @@ export default function Home() {
   const micTestMonitorRef = useRef<HTMLAudioElement | null>(null);
   const micAudioCtxRef = useRef<AudioContext | null>(null);
   const micRmsIntervalRef = useRef<number | undefined>(undefined);
+  const streamClientRef = useRef<VoiceStreamClient | null>(null);
+  const [partialText, setPartialText] = useState("");
+  const [streamLatency, setStreamLatency] = useState<string[]>([]);
 
   useEffect(() => {
     getHealth().then((data) => setHealth(data.status === "ok" ? "online" : "degraded")).catch(() => setHealth("offline"));
@@ -372,6 +376,78 @@ export default function Home() {
     }
   };
 
+  // ── STREAMING VOICE ──
+  const startStreamingVoice = async () => {
+    setError("");
+    setPartialText("");
+    setStreamLatency([]);
+    setState("recording");
+
+    const client = new VoiceStreamClient({
+      onConnected: (latencyMs) => {
+        setStreamLatency(prev => [...prev, `WS connected in ${latencyMs.toFixed(0)}ms`]);
+      },
+      onPartial: (text) => {
+        setPartialText(text);
+        setState("recording");
+      },
+      onFinal: (text, lang) => {
+        setPartialText("");
+        setState("processing");
+        // Run RAG pipeline with the final transcript.
+        queryVoice(new Blob([], { type: "audio/wav" }), voiceLang || undefined)
+          .catch(() => {}); // Fallback — use text query instead.
+        // Use text query with the final transcript.
+        queryText(text)
+          .then((qr) => {
+            setResult({ ...qr, transcript: text, detected_language: lang || "en" });
+            setQuery(text);
+            setState("complete");
+          })
+          .catch((err) => {
+            setError(err instanceof Error ? err.message : "Generation failed");
+            setState("error");
+          });
+      },
+      onSpeechStart: () => {
+        setStreamLatency(prev => [...prev, `Speech started`]);
+      },
+      onSpeechEnd: () => {
+        setStreamLatency(prev => [...prev, `Speech ended — finalizing...`]);
+      },
+      onError: (msg, fatal) => {
+        if (fatal) {
+          setError(`Streaming error: ${msg}`);
+          setState("error");
+          client.stop();
+        } else {
+          setStreamLatency(prev => [...prev, `Warning: ${msg}`]);
+        }
+      },
+      onLatency: (totalMs, audioBytes) => {
+        setStreamLatency(prev => [...prev, `Total: ${totalMs.toFixed(0)}ms, ${audioBytes} bytes`]);
+      },
+    });
+
+    streamClientRef.current = client;
+    await client.start(voiceLang || "en");
+  };
+
+  const stopStreamingVoice = () => {
+    streamClientRef.current?.stopRecording();
+    // The onFinal callback will handle the rest.
+    // If no final transcript arrives in 5s, force stop.
+    setTimeout(() => {
+      if (streamClientRef.current?.state !== "idle") {
+        streamClientRef.current?.stop();
+        if (state === "recording") {
+          setError("Streaming timed out. Try the regular recording.");
+          setState("error");
+        }
+      }
+    }, 5000);
+  };
+
   const stopRecording = () => {
     const rec = mediaRecorderRef.current;
     if (rec && rec.state !== "inactive") {
@@ -418,14 +494,19 @@ export default function Home() {
               <textarea ref={textareaRef} value={query} onChange={(event) => { setQuery(event.target.value); if (state === "error") setState("idle"); }} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") submitText(); }} placeholder="What would you like to understand?" disabled={state === "recording" || isBusy} aria-label="Ask the knowledge base" />
               <div className="composer-actions">
                 <div className="voice-controls">
-                  {state === "recording" ? <button className="mic-button recording" onClick={stopRecording} aria-label="Stop recording"><Square size={18} fill="currentColor" /><span className="pulse-ring" /></button> : <button className="mic-button" onClick={startRecording} disabled={isBusy} aria-label="Record a voice question"><Mic size={20} /></button>}
+                  {state === "recording" ? <button className="mic-button recording" onClick={stopStreamingVoice} aria-label="Stop recording"><Square size={18} fill="currentColor" /><span className="pulse-ring" /></button> : <button className="mic-button" onClick={startStreamingVoice} disabled={isBusy} aria-label="Stream voice question"><Mic size={20} /></button>}
                   <select className="voice-lang-select" value={voiceLang} onChange={(e) => setVoiceLang(e.target.value)} disabled={isBusy} aria-label="Voice language">
                     {voiceLanguages.map((l) => <option key={l.value} value={l.value}>{l.label}</option>)}
                   </select>
                 </div>
                 <button className="send-button" onClick={submitText} disabled={!query.trim() || isBusy || state === "recording"}><span>{isBusy ? "Processing" : "Ask"}</span>{isBusy ? <Activity size={17} className="spin" /> : <Send size={17} />}</button>
               </div>
-              {state === "recording" && <div className="recording-note"><span className="live-dot" /> Recording in progress. Tap stop when you're finished.</div>}
+              {state === "recording" && (
+                <>
+                  {partialText && <div style={{ marginTop: "6px", padding: "8px", background: "rgba(255,255,255,0.05)", borderRadius: "4px", fontFamily: "monospace", fontSize: "0.8rem", color: "var(--fg-secondary)" }}><span style={{ color: "var(--accent)", fontWeight: 600 }}>LIVE:</span> {partialText}<span style={{ animation: "blink 1s infinite" }}>|</span></div>}
+                  <div className="recording-note"><span className="live-dot" /> Streaming. Tap stop when done.</div>
+                </>
+              )}
               {isBusy && <div className="processing-line"><span /> <b>Retrieving knowledge and generating answer</b></div>}
             </div>
             <div style={{ marginTop: "0.75rem" }}>
@@ -506,7 +587,7 @@ export default function Home() {
                       </>
                     )}
                   </div>
-                  <div className="result-footer"><span>REQUEST <b>{result.request_id.slice(0, 8)}</b></span><LatencyDetails latency={result.latency} /><button className="new-query" onClick={reset}>New question <MicOff size={14} /></button></div>
+                  <div className="result-footer"><span>REQUEST <b>{result.request_id.slice(0, 8)}</b></span><LatencyDetails latency={result.latency} />{streamLatency.length > 0 && <details className="latency-details"><summary><Clock3 size={14} /> Stream latency</summary><div className="latency-grid">{streamLatency.map((l, i) => <span key={i}><small>{l}</small></span>)}</div></details>}<button className="new-query" onClick={reset}>New question <MicOff size={14} /></button></div>
                 </div>
               );
             })()}
