@@ -7,7 +7,9 @@ GET /health: service status and provider readiness
 """
 from __future__ import annotations
 
+import io
 import json
+import time
 import uuid
 from typing import Any
 
@@ -483,3 +485,182 @@ async def voice_query(
         request_id=request_id,
         latency=_format_latency(result.latency),
     )
+
+
+# ---------------------------------------------------------------------------
+# Diagnostic endpoint: isolate WebM/Opus format issues
+# ---------------------------------------------------------------------------
+
+@router.post("/diagnose/audio")
+async def diagnose_audio(
+    file: UploadFile = File(...),  # noqa: B008
+    lang: str = Form(default="en"),  # noqa: B008
+) -> dict[str, Any]:
+    """Diagnostic endpoint to test audio format compatibility with Sarvam.
+
+    Uploads the same audio in two formats:
+    1. Original WebM/Opus (as received from browser)
+    2. Extracted Opus rewrapped as OGG/Opus
+
+    Both are sent to Sarvam and the results are compared.
+    """
+    audio_bytes = await file.read()
+    request_id = str(uuid.uuid4())
+
+    # Determine format.
+    raw_format = "wav"
+    if file.content_type and "/" in file.content_type:
+        raw_format = file.content_type
+    elif file.filename and "." in file.filename:
+        raw_format = file.filename
+    audio_format = _normalize_audio_format(raw_format)
+
+    # WebM structural inspection.
+    webm_diag: dict[str, Any] = {}
+    if audio_format == "webm":
+        from app.services.webm_inspect import inspect_webm
+        wi = inspect_webm(audio_bytes)
+        webm_diag = {
+            "valid": wi.valid,
+            "doctype": wi.doctype,
+            "duration_ms": wi.duration_ms,
+            "timecode_scale": wi.timecode_scale,
+            "total_bytes": wi.total_bytes,
+            "tracks": [
+                {"codec": t.codec_id, "rate": t.sample_rate, "ch": t.channels}
+                for t in wi.tracks
+            ],
+            "first_16_hex": wi.first_bytes_hex,
+            "last_8_hex": wi.last_bytes_hex,
+            "error": wi.error,
+        }
+
+    # Direct Sarvam test with original WebM.
+    webm_result = await _direct_sarvam_test(
+        audio_bytes, audio_format, lang, f"audio.{audio_format}",
+    )
+
+    # Extract Opus and rewrap as OGG.
+    ogg_diag: dict[str, Any] = {}
+    ogg_result: dict[str, Any] = {}
+    if audio_format == "webm":
+        from app.services.opus_extract import webm_to_ogg_opus
+        ogg_bytes, ogg_extract_diag = webm_to_ogg_opus(audio_bytes)
+        ogg_diag = ogg_extract_diag
+
+        if ogg_bytes:
+            ogg_result = await _direct_sarvam_test(
+                ogg_bytes, "ogg", lang, "audio.ogg",
+            )
+        else:
+            ogg_result = {"error": ogg_extract_diag.get("error", "Extraction failed")}
+
+    return {
+        "request_id": request_id,
+        "original_format": audio_format,
+        "original_bytes": len(audio_bytes),
+        "webm_inspection": webm_diag,
+        "sarvam_webm_result": webm_result,
+        "ogg_extraction": ogg_diag,
+        "sarvam_ogg_result": ogg_result,
+    }
+
+
+async def _direct_sarvam_test(
+    audio_bytes: bytes,
+    audio_format: str,
+    lang: str,
+    filename: str,
+) -> dict[str, Any]:
+    """Send audio directly to Sarvam and return the raw result.
+
+    Does NOT go through the pipeline — sends directly to the API.
+    """
+    settings = get_settings()
+    api_key = settings.stt_api_key
+    if not api_key:
+        return {"error": "SARVAM_API_KEY not configured"}
+
+    try:
+        import httpx
+    except ImportError:
+        return {"error": "httpx not installed"}
+
+    # Build BCP-47 language code.
+    from app.services.sarvam_stt import _ISO_TO_BCP47, _SARVAM_STT_URL
+    hint = (lang or "").lower().strip()
+    bcp47 = _ISO_TO_BCP47.get(hint) if hint else None
+    language_code = bcp47 if bcp47 else "unknown"
+
+    # Build MIME type.
+    if audio_format == "webm":
+        mime = "audio/webm"
+    elif audio_format == "ogg":
+        mime = "audio/ogg"
+    elif audio_format == "wav":
+        mime = "audio/wav"
+    else:
+        mime = f"audio/{audio_format}"
+
+    files = {
+        "file": (filename, io.BytesIO(audio_bytes), mime),
+    }
+    data: dict[str, str] = {
+        "model": "saaras:v3",
+        "mode": "transcribe",
+        "language_code": language_code,
+    }
+    headers = {"api-subscription-key": api_key}
+
+    logger.info(
+        "diagnose_sarvam_request",
+        audio_bytes=len(audio_bytes),
+        audio_format=audio_format,
+        filename=filename,
+        mime=mime,
+        language_code=language_code,
+    )
+
+    start = time.time()
+    try:
+        resp = httpx.post(
+            _SARVAM_STT_URL,
+            files=files,
+            data=data,
+            headers=headers,
+            timeout=30.0,
+        )
+        elapsed_ms = round((time.time() - start) * 1000, 1)
+
+        if resp.status_code == 200:
+            result = resp.json()
+            logger.info(
+                "diagnose_sarvam_success",
+                audio_format=audio_format,
+                transcript=result.get("transcript", "")[:80],
+                language_code=result.get("language_code"),
+                elapsed_ms=elapsed_ms,
+            )
+            return {
+                "status": 200,
+                "transcript": result.get("transcript", ""),
+                "language_code": result.get("language_code"),
+                "request_id": result.get("request_id"),
+                "elapsed_ms": elapsed_ms,
+                "all_keys": list(result.keys()),
+            }
+        else:
+            logger.warning(
+                "diagnose_sarvam_error",
+                audio_format=audio_format,
+                status=resp.status_code,
+                body=resp.text[:200],
+            )
+            return {
+                "status": resp.status_code,
+                "error": resp.text[:500],
+                "elapsed_ms": elapsed_ms,
+            }
+    except Exception as e:
+        elapsed_ms = round((time.time() - start) * 1000, 1)
+        return {"error": str(e), "elapsed_ms": elapsed_ms}
