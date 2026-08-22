@@ -98,6 +98,9 @@ export default function Home() {
   const [diagBusy, setDiagBusy] = useState(false);
   const [canPlay, setCanPlay] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [micTestInfo, setMicTestInfo] = useState<string[]>([]);
+  const [micTestStream, setMicTestStream] = useState<MediaStream | null>(null);
+  const micTestMonitorRef = useRef<HTMLAudioElement | null>(null);
 
   useEffect(() => {
     getHealth().then((data) => setHealth(data.status === "ok" ? "online" : "degraded")).catch(() => setHealth("offline"));
@@ -139,18 +142,8 @@ export default function Home() {
         try { prevRec.requestData(); prevRec.stop(); } catch { /* already stopped */ }
       }
 
-      // Request microphone with explicit constraints to avoid Chrome
-      // silently applying aggressive noise suppression / echo cancellation
-      // that can mute the actual speech signal.
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: false,
-          channelCount: 1,
-          sampleRate: 48000,
-        },
-      });
+      // Simplest possible mic acquisition — no constraints, no processing.
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
       // Log MediaStream diagnostics.
       const tracks = stream.getTracks();
@@ -160,29 +153,13 @@ export default function Home() {
       tracks.forEach((t, i) => {
         const s = t.getSettings();
         console.log(`[Voice]   track[${i}]: kind=${t.kind} label=${t.label} readyState=${t.readyState} enabled=${t.enabled} muted=${t.muted}`);
-        console.log(`[Voice]   settings: sampleRate=${s.sampleRate} channelCount=${s.channelCount} deviceId=${s.deviceId?.slice(0,12)}...`);
+        console.log(`[Voice]   settings: sampleRate=${s.sampleRate} channelCount=${s.channelCount} deviceId=${s.deviceId}`);
       });
       console.log(`[Voice] stream.active: ${stream.active}`);
       console.log(`[Voice] ═══════════════════`);
 
-      const recorder = new MediaRecorder(stream, {
-        mimeType: 'audio/webm;codecs=opus',
-        audioBitsPerSecond: 128000,
-      });
+      const recorder = new MediaRecorder(stream);
       console.log(`[Voice] recorder.mimeType: ${recorder.mimeType}`);
-
-      // Live mic monitor: hidden audio element plays the live stream
-      // so user can hear themselves and verify mic is capturing audio.
-      const monitor = document.createElement('audio');
-      monitor.srcObject = stream;
-      monitor.muted = false;
-      monitor.play().then(() => {
-        console.log('[Voice] LIVE MIC MONITOR: active — you should hear yourself');
-      }).catch((e) => {
-        console.warn('[Voice] LIVE MIC MONITOR: autoplay blocked', e.message);
-      });
-      // Store for cleanup.
-      (window as any).__voiceMonitor = monitor;
 
       // Clear old chunks and increment session BEFORE registering handlers.
       chunksRef.current = [];
@@ -307,6 +284,67 @@ export default function Home() {
     }
   };
 
+  const testMic = async () => {
+    const lines: string[] = [];
+    const push = (s: string) => { lines.push(s); console.log(`[MicTest] ${s}`); };
+    push(`navigator.mediaDevices exists: ${!!navigator.mediaDevices}`);
+    push(`getUserMedia exists: ${!!navigator.mediaDevices?.getUserMedia}`);
+    // Stop previous test stream.
+    if (micTestStream) {
+      micTestStream.getTracks().forEach(t => t.stop());
+      setMicTestStream(null);
+    }
+    if (micTestMonitorRef.current) {
+      micTestMonitorRef.current.srcObject = null;
+      micTestMonitorRef.current = null;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const tracks = stream.getAudioTracks();
+      push(`getUserMedia succeeded: true`);
+      push(`audio tracks: ${tracks.length}`);
+      tracks.forEach((t, i) => {
+        push(`  track[${i}]: kind=${t.kind} label="${t.label}" readyState=${t.readyState} enabled=${t.enabled} muted=${t.muted}`);
+        const s = t.getSettings();
+        push(`  settings: sampleRate=${s.sampleRate} channelCount=${s.channelCount} deviceId=${s.deviceId} groupId=${s.groupId}`);
+      });
+      push(`stream.active: ${stream.active}`);
+      // Enumerate all audio input devices.
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const audioInputs = devices.filter(d => d.kind === 'audioinput');
+      push(`\navailable audio input devices (${audioInputs.length}):`);
+      audioInputs.forEach((d, i) => {
+        push(`  [${i}] label="${d.label}" deviceId=${d.deviceId.slice(0,16)}... groupId=${d.groupId.slice(0,16)}...`);
+      });
+      // Attach to visible audio element for live monitoring.
+      setMicTestStream(stream);
+      setMicTestInfo([...lines]);
+      // Play through visible audio element.
+      setTimeout(() => {
+        const el = micTestMonitorRef.current;
+        if (el) {
+          el.srcObject = stream;
+          el.play().then(() => push('Live monitor: PLAYING — you should hear yourself')).catch(e => push(`Live monitor error: ${e.message}`));
+        }
+      }, 100);
+    } catch (e) {
+      push(`getUserMedia FAILED: ${e}`);
+      push(`getUserMedia succeeded: false`);
+      setMicTestInfo([...lines]);
+    }
+  };
+
+  const stopMicTest = () => {
+    if (micTestStream) {
+      micTestStream.getTracks().forEach(t => t.stop());
+      setMicTestStream(null);
+    }
+    if (micTestMonitorRef.current) {
+      micTestMonitorRef.current.srcObject = null;
+    }
+    setMicTestInfo([]);
+  };
+
   const stopRecording = () => {
     const rec = mediaRecorderRef.current;
     if (rec && rec.state !== "inactive") {
@@ -373,6 +411,27 @@ export default function Home() {
                 {diagBusy ? "Running ..." : "Diagnose last recording (WebM vs OGG)"}
               </button>
               {diagResult && <pre style={{ marginTop: "0.5rem", fontSize: "0.65rem", maxHeight: "300px", overflow: "auto", padding: "8px", background: "rgba(0,0,0,0.3)", borderRadius: "4px", whiteSpace: "pre-wrap", wordBreak: "break-all", color: "var(--fg-secondary)" }}>{diagResult}</pre>}
+            </div>
+
+            <div style={{ marginTop: "1rem", padding: "10px", border: "1px solid rgba(255,100,100,0.3)", borderRadius: "6px", background: "rgba(255,100,100,0.05)" }}>
+              <div style={{ fontSize: "0.75rem", fontWeight: 600, color: "#f88", marginBottom: "6px" }}>MIC TEST</div>
+              <div style={{ display: "flex", gap: "6px", marginBottom: "8px" }}>
+                {!micTestStream ? (
+                  <button onClick={testMic} style={{ fontSize: "0.7rem", padding: "4px 10px", background: "rgba(255,100,100,0.15)", border: "1px solid rgba(255,100,100,0.3)", borderRadius: "4px", color: "#f88", cursor: "pointer" }}>
+                    Test Microphone
+                  </button>
+                ) : (
+                  <button onClick={stopMicTest} style={{ fontSize: "0.7rem", padding: "4px 10px", background: "rgba(100,200,100,0.15)", border: "1px solid rgba(100,200,100,0.3)", borderRadius: "4px", color: "#8c8", cursor: "pointer" }}>
+                    Stop Mic Test
+                  </button>
+                )}
+              </div>
+              {micTestInfo.length > 0 && (
+                <div style={{ fontSize: "0.65rem", fontFamily: "monospace", lineHeight: 1.6, color: "var(--fg-secondary)", whiteSpace: "pre-wrap" }}>
+                  {micTestInfo.join('\n')}
+                </div>
+              )}
+              <audio ref={micTestMonitorRef} style={{ display: 'block', marginTop: '6px', width: '100%', height: '32px' }} controls muted={false} />
             </div>
 
             <div className="examples"><div className="section-label"><Sparkles size={14} /> TRY AN EXAMPLE</div>{examples.map((example) => <button key={example} onClick={() => { setQuery(example); setState("idle"); }}>{example}<ArrowUpRight size={14} /></button>)}</div>
