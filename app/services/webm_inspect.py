@@ -1,10 +1,13 @@
 """
 Lightweight WebM/EBML header inspector.
 
-Parses only the first few hundred bytes of a WebM file to extract:
+Parses WebM files to extract:
 - DocType
 - Duration (if present in SegmentInfo)
 - Track codec IDs, sample rates, channels
+
+Handles Chrome MediaRecorder's WebM structure where SegmentInfo and Tracks
+may be nested directly inside the Segment element.
 
 No external dependencies — pure struct-based parsing.
 """
@@ -17,7 +20,7 @@ from dataclasses import dataclass, field
 @dataclass
 class WebMTrack:
     track_number: int = 0
-    track_type: int = 0  # 1=audio, 2=video
+    track_type: int = 0  # 1=video, 2=audio
     codec_id: str = ""
     sample_rate: float = 0.0
     channels: int = 0
@@ -36,59 +39,74 @@ class WebMInfo:
     error: str | None = None
 
 
-def _read_element_id(data: bytes, offset: int) -> tuple[int, int] | None:
-    """Read an EBML element ID and size at offset. Returns (id, size) or None."""
+def _read_ebml_id(data: bytes, offset: int) -> tuple[int, int] | None:
+    """Read an EBML Element ID, preserving the width-marker bits.
+
+    EBML Element IDs use the VINT encoding where the leading zeros
+    indicate the byte width, but unlike VINT *sizes*, the full on-disk
+    value (including the width marker) is the canonical element ID.
+
+    For example, the EBML Header ID ``0x1A45DFA3`` is stored as the
+    4 bytes ``1A 45 DF A3``.  This function returns the full 4-byte
+    value ``0x1A45DFA3``, NOT the stripped ``0x0A45DFA3``.
+
+    Returns (element_id, bytes_consumed) or None.
+    """
     if offset >= len(data):
         return None
     b = data[offset]
-    # Determine ID length from leading bits.
-    if b & 0x80:
-        eid = b & 0x7F
-        size_start = offset + 1
-    elif b & 0x40:
-        eid = (b & 0x3F) << 8 | (data[offset + 1] if offset + 1 < len(data) else 0)
-        size_start = offset + 2
-    elif b & 0x20:
-        eid = ((b & 0x1F) << 16
-               | (data[offset + 1] << 8 if offset + 1 < len(data) else 0)
-               | (data[offset + 2] if offset + 2 < len(data) else 0))
-        size_start = offset + 3
-    elif b & 0x10:
-        eid = ((b & 0x0F) << 24
-               | (data[offset + 1] << 16 if offset + 1 < len(data) else 0)
-               | (data[offset + 2] << 8 if offset + 2 < len(data) else 0)
-               | (data[offset + 3] if offset + 3 < len(data) else 0))
-        size_start = offset + 4
-    else:
-        return None
+    for width in range(1, 9):
+        mask = 1 << (8 - width)
+        if b & mask:
+            val = 0
+            for i in range(width):
+                if offset + i >= len(data):
+                    return None
+                val = (val << 8) | data[offset + i]
+            return val, width
+    return None
 
-    # Read variable-length size.
-    if size_start >= len(data):
-        return None
-    sb = data[size_start]
-    if sb & 0x80:
-        esize = sb & 0x7F
-        val_start = size_start + 1
-    elif sb & 0x40:
-        if size_start + 1 >= len(data):
-            return None
-        esize = ((sb & 0x3F) << 8) | data[size_start + 1]
-        val_start = size_start + 2
-    elif sb & 0x20:
-        if size_start + 2 >= len(data):
-            return None
-        esize = ((sb & 0x1F) << 16) | (data[size_start + 1] << 8) | data[size_start + 2]
-        val_start = size_start + 3
-    elif sb & 0x10:
-        if size_start + 3 >= len(data):
-            return None
-        esize = ((sb & 0x0F) << 24 | data[size_start + 1] << 16
-                 | data[size_start + 2] << 8 | data[size_start + 3])
-        val_start = size_start + 4
-    else:
-        return None
 
-    return (eid, esize, val_start)  # type: ignore[return-value]
+def _read_vint(data: bytes, offset: int) -> tuple[int, int] | None:
+    """Read an EBML variable-length integer (sizes).
+
+    Strips the width-marker bits, returning the numeric value.
+    Used for element *sizes*, not element IDs.
+
+    Returns (value, bytes_consumed) or None.
+    """
+    if offset >= len(data):
+        return None
+    b = data[offset]
+    for width in range(1, 9):
+        mask = 1 << (8 - width)
+        if b & mask:
+            val = b & (mask - 1)
+            for i in range(1, width):
+                if offset + i >= len(data):
+                    return None
+                val = (val << 8) | data[offset + i]
+            return val, width
+    return None
+
+
+def _read_element(data: bytes, offset: int) -> tuple[int, int, int] | None:
+    """Read an EBML element: (element_id, value_size, value_start_offset).
+
+    Element ID preserves the on-disk value (with width marker).
+    Size is the stripped numeric value.
+    """
+    id_result = _read_ebml_id(data, offset)
+    if id_result is None:
+        return None
+    eid, eid_len = id_result
+    size_offset = offset + eid_len
+    size_result = _read_vint(data, size_offset)
+    if size_result is None:
+        return None
+    esize, esize_len = size_result
+    val_start = size_offset + esize_len
+    return eid, esize, val_start
 
 
 def _read_uint(data: bytes, offset: int, size: int) -> int | None:
@@ -119,8 +137,88 @@ def _read_string(data: bytes, offset: int, size: int) -> str:
     return data[offset:offset + size].decode("utf-8", errors="replace")
 
 
+def _parse_segment_info(
+    data: bytes, val_start: int, val_end: int,
+) -> tuple[int | None, float | None]:
+    """Parse SegmentInfo children. Returns (timecode_scale, duration_ms)."""
+    timecode_scale: int | None = None
+    duration_ns: float | None = None
+    spos = val_start
+    while spos < val_end:
+        sub = _read_element(data, spos)
+        if sub is None:
+            break
+        sid, ssz, sval = sub
+        if sid == 0x2AD7B1:  # TimecodeScale
+            timecode_scale = _read_uint(data, sval, ssz)
+        elif sid == 0x4489:  # Duration
+            duration_ns = _read_float(data, sval, ssz)
+        spos = sval + ssz
+    duration_ms: float | None = None
+    if duration_ns is not None and timecode_scale and timecode_scale > 0:
+        duration_ms = (duration_ns * timecode_scale) / 1_000_000
+    return timecode_scale, duration_ms
+
+
+def _parse_track_entry(data: bytes, tval: int, tsz: int) -> WebMTrack | None:
+    """Parse a TrackEntry element."""
+    track = WebMTrack()
+    epos = tval
+    while epos < tval + tsz:
+        esub = _read_element(data, epos)
+        if esub is None:
+            break
+        esid, essz, esval = esub
+        if esid == 0xD7:  # TrackNumber
+            val = _read_uint(data, esval, essz)
+            track.track_number = val or 0
+        elif esid == 0x83:  # TrackType
+            track.track_type = _read_uint(data, esval, essz) or 0
+        elif esid == 0x86:  # CodecID
+            track.codec_id = _read_string(data, esval, essz)
+        elif esid == 0xE1:  # Audio
+            apos = esval
+            while apos < esval + essz:
+                asub = _read_element(data, apos)
+                if asub is None:
+                    break
+                asid, asz, asval = asub
+                if asid == 0xB5:  # SamplingFrequency
+                    rate = _read_float(data, asval, asz)
+                    track.sample_rate = rate or 0.0
+                elif asid == 0x9F:  # Channels
+                    ch = _read_uint(data, asval, asz)
+                    track.channels = ch or 0
+                apos = asval + asz
+        epos = esval + essz
+    return track if track.track_number else None
+
+
+def _parse_tracks_element(data: bytes, val_start: int, val_end: int) -> list[WebMTrack]:
+    """Parse a Tracks element, returning list of tracks."""
+    tracks: list[WebMTrack] = []
+    tpos = val_start
+    while tpos < val_end:
+        sub = _read_element(data, tpos)
+        if sub is None:
+            break
+        tid, tsz, tval = sub
+        if tid == 0xAE:  # TrackEntry
+            track = _parse_track_entry(data, tval, tsz)
+            if track:
+                tracks.append(track)
+        tpos = tval + tsz
+    return tracks
+
+
 def inspect_webm(audio_bytes: bytes) -> WebMInfo:
-    """Inspect WebM header metadata without external dependencies."""
+    """Inspect WebM header metadata without external dependencies.
+
+    Handles two WebM structures:
+    1. Standard: Segment → SegmentInfo + Tracks + Clusters
+    2. Chrome MediaRecorder: Segment → Clusters (with SegmentInfo/Tracks
+       nested inside or after Clusters, or absent entirely).
+    """
     info = WebMInfo(total_bytes=len(audio_bytes))
 
     if len(audio_bytes) < 12:
@@ -138,11 +236,9 @@ def inspect_webm(audio_bytes: bytes) -> WebMInfo:
     try:
         pos = 0
         doc_found = False
-        current_track: WebMTrack | None = None
-        limit = min(len(audio_bytes), 4096)  # Only inspect first 4KB
 
-        while pos < limit:
-            result = _read_element_id(audio_bytes, pos)
+        while pos < len(audio_bytes) - 4:
+            result = _read_element(audio_bytes, pos)
             if result is None:
                 break
             eid, esize, val_start = result
@@ -152,66 +248,27 @@ def inspect_webm(audio_bytes: bytes) -> WebMInfo:
                 info.doctype = _read_string(audio_bytes, val_start, esize)
                 doc_found = True
 
-            elif eid == 0x1549A966:  # SegmentInfo
-                # Parse children of SegmentInfo
+            elif eid == 0x18538067:  # Segment
+                # Parse Segment children — find SegmentInfo and Tracks.
+                # Chrome may put them directly inside Segment.
                 spos = val_start
                 while spos < val_end:
-                    sub = _read_element_id(audio_bytes, spos)
+                    sub = _read_element(audio_bytes, spos)
                     if sub is None:
                         break
                     sid, ssz, sval = sub
-                    if sid == 0x2AD7B1:  # TimecodeScale
-                        info.timecode_scale = _read_uint(audio_bytes, sval, ssz)
-                    elif sid == 0x4489:  # Duration
-                        info.duration_ms = _read_float(audio_bytes, sval, ssz)
-                        if info.timecode_scale and info.timecode_scale > 0:
-                            # Duration in ns → ms
-                            info.duration_ms = (info.duration_ms * info.timecode_scale) / 1_000_000
-                    spos = sval + ssz
 
-            elif eid == 0x1654AE6B:  # Tracks
-                # Parse track entries
-                tpos = val_start
-                while tpos < val_end:
-                    sub = _read_element_id(audio_bytes, tpos)
-                    if sub is None:
-                        break
-                    tid, tsz, tval = sub
-                    if tid == 0xAE:  # TrackEntry
-                        current_track = WebMTrack()
-                        # Parse track entry children
-                        epos = tval
-                        while epos < tval + tsz:
-                            esub = _read_element_id(audio_bytes, epos)
-                            if esub is None:
-                                break
-                            esid, essz, esval = esub
-                            if esid == 0xD7:  # TrackNumber
-                                val = _read_uint(audio_bytes, esval, essz)
-                                current_track.track_number = val or 0
-                            elif esid == 0x83:  # TrackType
-                                current_track.track_type = _read_uint(audio_bytes, esval, essz) or 0
-                            elif esid == 0x86:  # CodecID
-                                current_track.codec_id = _read_string(audio_bytes, esval, essz)
-                            elif esid == 0xE1:  # Audio
-                                # Parse audio sub-elements
-                                apos = esval
-                                while apos < esval + essz:
-                                    asub = _read_element_id(audio_bytes, apos)
-                                    if asub is None:
-                                        break
-                                    asid, asz, asval = asub
-                                    if asid == 0xB5:  # SamplingFrequency
-                                        rate = _read_float(audio_bytes, asval, asz)
-                                        current_track.sample_rate = rate or 0.0
-                                    elif asid == 0x9F:  # Channels
-                                        ch = _read_uint(audio_bytes, asval, asz)
-                                        current_track.channels = ch or 0
-                                    apos = asval + asz
-                            epos = esval + essz
-                        if current_track.track_number:
-                            info.tracks.append(current_track)
-                    tpos = tval + tsz
+                    if sid == 0x1549A966:  # SegmentInfo
+                        info.timecode_scale, info.duration_ms = (
+                            _parse_segment_info(audio_bytes, sval, sval + ssz)
+                        )
+                    elif sid == 0x1654AE6B:  # Tracks
+                        info.tracks = _parse_tracks_element(
+                            audio_bytes, sval, sval + ssz,
+                        )
+                    # Note: We do NOT recurse into Clusters — they can be very large.
+
+                    spos = sval + ssz
 
             pos = val_end
 

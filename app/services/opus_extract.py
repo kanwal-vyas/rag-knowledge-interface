@@ -26,8 +26,42 @@ class OpusPacket:
     timecode: int  # milliseconds relative to cluster
 
 
+def _read_ebml_id(data: bytes, offset: int) -> tuple[int, int] | None:
+    """Read an EBML Element ID, preserving the width-marker bits.
+
+    EBML Element IDs use the VINT encoding where the leading zeros
+    indicate the byte width, but unlike VINT *sizes*, the full on-disk
+    value (including the width marker) is the canonical element ID.
+
+    For example, the EBML Header ID ``0x1A45DFA3`` is stored as the
+    4 bytes ``1A 45 DF A3``.  This function returns the full 4-byte
+    value ``0x1A45DFA3``, NOT the stripped ``0x0A45DFA3``.
+
+    Returns (element_id, bytes_consumed) or None.
+    """
+    if offset >= len(data):
+        return None
+    b = data[offset]
+    for width in range(1, 9):
+        mask = 1 << (8 - width)
+        if b & mask:
+            val = 0
+            for i in range(width):
+                if offset + i >= len(data):
+                    return None
+                val = (val << 8) | data[offset + i]
+            return val, width
+    return None
+
+
 def _read_vint(data: bytes, offset: int) -> tuple[int, int] | None:
-    """Read an EBML variable-length integer. Returns (value, bytes_consumed)."""
+    """Read an EBML variable-length integer (sizes).
+
+    Strips the width-marker bits, returning the numeric value.
+    Used for element *sizes*, not element IDs.
+
+    Returns (value, bytes_consumed) or None.
+    """
     if offset >= len(data):
         return None
     b = data[offset]
@@ -45,7 +79,7 @@ def _read_vint(data: bytes, offset: int) -> tuple[int, int] | None:
 
 def _read_ebml_element(data: bytes, offset: int) -> tuple[int, int, int] | None:
     """Read an EBML element: (element_id, value_size, value_start_offset)."""
-    eid_result = _read_vint(data, offset)
+    eid_result = _read_ebml_id(data, offset)
     if eid_result is None:
         return None
     eid, eid_len = eid_result
@@ -385,4 +419,132 @@ def webm_to_ogg_opus(webm_bytes: bytes) -> tuple[bytes, dict]:
     ogg_bytes = packets_to_ogg(packets)
     diag["ogg_bytes"] = len(ogg_bytes)
 
+    # Signal-level analysis.
+    diag["signal_analysis"] = analyze_opus_packets(packets)
+
     return ogg_bytes, diag
+
+
+# ---------------------------------------------------------------------------
+# Opus TOC byte analysis and signal diagnostics
+# ---------------------------------------------------------------------------
+
+# Opus TOC byte layout:
+#   Bits 7-3: configuration number
+#   Bit 2: stereo (0=mono, 1=stereo)
+#   Bits 1-0: frame count code (0=1 frame, 1=2 frames, 2=2 frames, 3=arbitrary)
+#
+# Configuration 0-3:   NB (narrowband, 8kHz)
+# Configuration 4-7:   MB (medium-band, 12kHz)
+# Configuration 8-11:  WB (wideband, 16kHz)
+# Configuration 12-15: SWB (super-wideband, 24kHz)
+# Configuration 16-19: FB (fullband, 48kHz)
+# Configuration 20+:  special (CELT, hybrid, etc.)
+
+_OPUS_BANDWIDTH_NAMES = {
+    range(0, 4): "NB",
+    range(4, 8): "MB",
+    range(8, 12): "WB",
+    range(12, 16): "SWB",
+    range(16, 20): "FB",
+    range(20, 32): "Special",
+}
+
+
+def _get_bandwidth_name(config: int) -> str:
+    for rng, name in _OPUS_BANDWIDTH_NAMES.items():
+        if config in rng:
+            return name
+    return "Unknown"
+
+
+def _estimate_packet_duration_ms(toc: int) -> float:
+    """Estimate the duration of a single Opus packet from its TOC byte."""
+    frame_count_code = toc & 0x03
+    # Default frame sizes for common configs.
+    # Config 0-19: frame size is 2.5, 5, 10, 20, 40, or 60 ms depending on config.
+    # For simplicity, use 20ms as the most common MediaRecorder frame size.
+    frame_ms = 20.0
+    if frame_count_code == 0:
+        return frame_ms
+    elif frame_count_code == 1 or frame_count_code == 2:
+        return frame_ms * 2
+    else:
+        # Arbitrary frame count — cannot determine without parsing.
+        return frame_ms
+
+
+def analyze_opus_packets(packets: list[OpusPacket]) -> dict:
+    """Analyze Opus packets for signal diagnostics.
+
+    Reports TOC byte distribution, estimated duration, bandwidth,
+    stereo/mono ratio, and packet size statistics.
+    """
+    if not packets:
+        return {"error": "No packets to analyze"}
+
+    toc_values: list[int] = []
+    config_counts: dict[str, int] = {}
+    stereo_count = 0
+    mono_count = 0
+    frame_count_codes: dict[int, int] = {}
+    sizes = [len(p.data) for p in packets]
+    total_duration_ms = 0.0
+    timecode_span_ms: float | None = None
+
+    for pkt in packets:
+        if not pkt.data:
+            continue
+        toc = pkt.data[0]
+        toc_values.append(toc)
+        config = (toc >> 3) & 0x1F
+        stereo = bool(toc & 0x04)
+        frame_code = toc & 0x03
+
+        bw = _get_bandwidth_name(config)
+        config_counts[bw] = config_counts.get(bw, 0) + 1
+        if stereo:
+            stereo_count += 1
+        else:
+            mono_count += 1
+        frame_count_codes[frame_code] = frame_count_codes.get(frame_code, 0) + 1
+        total_duration_ms += _estimate_packet_duration_ms(toc)
+
+    if len(packets) >= 2:
+        first_tc = packets[0].timecode
+        last_tc = packets[-1].timecode
+        timecode_span_ms = float(last_tc - first_tc)
+
+    first_sizes = sizes[:10]
+    last_sizes = sizes[-5:]
+    avg_size = sum(sizes) / len(sizes) if sizes else 0
+    # Estimate speech energy from packet sizes.
+    # Very small packets (< 10 bytes) typically indicate silence/DTX.
+    silence_packets = sum(1 for s in sizes if s < 10)
+    tiny_packets = sum(1 for s in sizes if s < 5)
+
+    return {
+        "packet_count": len(packets),
+        "total_opus_bytes": sum(sizes),
+        "avg_packet_bytes": round(avg_size, 1),
+        "first_packet_sizes": first_sizes,
+        "last_packet_sizes": last_sizes,
+        "first_toc_hex": hex(toc_values[0]) if toc_values else None,
+        "last_toc_hex": hex(toc_values[-1]) if toc_values else None,
+        "stereo_packets": stereo_count,
+        "mono_packets": mono_count,
+        "bandwidth_distribution": config_counts,
+        "frame_count_codes": frame_count_codes,
+        "estimated_duration_ms": round(total_duration_ms, 1),
+        "timecode_span_ms": round(timecode_span_ms, 1) if timecode_span_ms is not None else None,
+        "silence_packets_lt10bytes": silence_packets,
+        "tiny_packets_lt5bytes": tiny_packets,
+        "silence_ratio": round(silence_packets / len(sizes), 3) if sizes else 0,
+        "timecodes_first_10": [p.timecode for p in packets[:10]],
+        "timecodes_last_5": [p.timecode for p in packets[-5:]],
+        "first_packet_hex_32": (
+            packets[0].data[:32].hex()
+            if packets and len(packets[0].data) >= 32
+            else (packets[0].data.hex() if packets else "")
+        ),
+    }
