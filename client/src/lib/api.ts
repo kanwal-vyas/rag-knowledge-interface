@@ -78,12 +78,15 @@ export async function queryVoice(blob: Blob, language?: string): Promise<VoiceQu
   form.append("lang", language || "");
   form.append("retrieval_mode", "cross_lingual");
   form.append("top_k", "10");
+  console.log(`[Voice] uploading: ${blob.size} bytes, type: ${blob.type}, lang: "${language || ""}"`);
 
   const response = await fetch(`${API_BASE_URL}/voice/query`, {
     method: "POST",
     body: form,
   });
-  return parseResponse<VoiceQueryResponse>(response);
+  const result = await parseResponse<VoiceQueryResponse>(response);
+  console.log(`[Voice] response — transcript: "${result.transcript}", lang: ${result.detected_language}`);
+  return result;
 }
 
 export async function getHealth(): Promise<HealthResponse> {

@@ -213,6 +213,14 @@ class SarvamSTTProvider(STTProvider):
         }
 
         start_time = time.perf_counter()
+        logger.info(
+            "sarvam_request_sending",
+            audio_bytes=len(audio_bytes),
+            audio_format=audio_format,
+            model=self.model,
+            mode=self.mode,
+            language_code=data.get("language_code"),
+        )
         try:
             response = httpx.post(
                 _SARVAM_STT_URL,
@@ -235,7 +243,9 @@ class SarvamSTTProvider(STTProvider):
                     "sarvam_stt_success",
                     language=iso_lang,
                     bcp47=lang_code,
+                    transcript=transcript[:80],
                     transcript_length=len(transcript),
+                    request_id=request_id,
                     elapsed_ms=round(elapsed_ms, 1),
                 )
 

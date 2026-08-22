@@ -90,6 +90,7 @@ export default function Home() {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const timerRef = useRef<number | undefined>(undefined);
+  const recordStartRef = useRef<number>(0);
 
   useEffect(() => {
     getHealth().then((data) => setHealth(data.status === "ok" ? "online" : "degraded")).catch(() => setHealth("offline"));
@@ -123,7 +124,9 @@ export default function Home() {
       recorder.onstop = async () => {
         stream.getTracks().forEach((track) => track.stop());
         if (timerRef.current) window.clearInterval(timerRef.current);
+        const duration = ((Date.now() - recordStartRef.current) / 1000).toFixed(1);
         const blob = new Blob(chunksRef.current, { type: recorder.mimeType || "audio/webm" });
+        console.log(`[Voice] recording stopped — chunks: ${chunksRef.current.length}, size: ${blob.size} bytes, duration: ${duration}s, type: ${blob.type}`);
         if (!blob.size) { setError("No audio was captured. Please try again."); setState("error"); return; }
         setState("processing");
         try {
@@ -133,6 +136,7 @@ export default function Home() {
           setError(err instanceof Error ? err.message : "Voice processing failed. Please try text instead."); setState("error");
         }
       };
+      recordStartRef.current = Date.now();
       recorder.start(); mediaRecorderRef.current = recorder; setRecordSeconds(0); setState("recording");
       timerRef.current = window.setInterval(() => setRecordSeconds((value) => value + 1), 1000);
     } catch {
@@ -140,7 +144,13 @@ export default function Home() {
     }
   };
 
-  const stopRecording = () => { if (mediaRecorderRef.current?.state === "recording") mediaRecorderRef.current.stop(); };
+  const stopRecording = () => {
+    const rec = mediaRecorderRef.current;
+    if (rec && rec.state === "recording") {
+      rec.requestData();
+      rec.stop();
+    }
+  };
   const reset = () => { setQuery(""); setResult(null); setError(""); setState("idle"); setRecordSeconds(0); setTimeout(() => textareaRef.current?.focus(), 0); };
   const isBusy = state === "processing";
 

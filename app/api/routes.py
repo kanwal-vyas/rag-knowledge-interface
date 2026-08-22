@@ -358,6 +358,12 @@ async def voice_query(
 
     # Read audio bytes.
     audio_bytes = await file.read()
+    logger.info(
+        "voice_audio_received",
+        byte_length=len(audio_bytes),
+        content_type=file.content_type,
+        filename=file.filename,
+    )
     if not audio_bytes:
         return VoiceQueryResponse(
             transcript="",
