@@ -351,26 +351,36 @@ class TextPipeline:
             )
 
         # ── Stage 3: Delegate to text pipeline ──
-        text_result = self.run(
-            query_text=transcription.text,
-            lang=lang,
-            mode=mode,
-            top_k=top_k,
-        )
-
-        # Merge latencies: keep voice pipeline's STT ms, use text pipeline's others.
-        latency.sparse_retrieval_ms = text_result.latency.sparse_retrieval_ms
-        latency.context_assembly_ms = text_result.latency.context_assembly_ms
-        latency.generation_ms = text_result.latency.generation_ms
-        latency.guardrail_ms = text_result.latency.guardrail_ms
-        latency.total_ms = (
-            time.perf_counter() - overall_start
-        ) * 1000
-
-        return HarnessResult(
-            response=text_result.response,
-            guardrail=text_result.guardrail,
-            latency=latency,
-            transcript=transcription.text,
-            detected_language=lang,
-        )
+        try:
+            text_result = self.run(
+                query_text=transcription.text,
+                lang=lang,
+                mode=mode,
+                top_k=top_k,
+            )
+            latency.sparse_retrieval_ms = text_result.latency.sparse_retrieval_ms
+            latency.context_assembly_ms = text_result.latency.context_assembly_ms
+            latency.generation_ms = text_result.latency.generation_ms
+            latency.guardrail_ms = text_result.latency.guardrail_ms
+            latency.total_ms = (
+                time.perf_counter() - overall_start
+            ) * 1000
+            return HarnessResult(
+                response=text_result.response,
+                guardrail=text_result.guardrail,
+                latency=latency,
+                transcript=transcription.text,
+                detected_language=lang,
+            )
+        except PipelineError as e:
+            # Preserve STT result when generation/retrieval fails.
+            latency.total_ms = (
+                time.perf_counter() - overall_start
+            ) * 1000
+            return HarnessResult(
+                response=GenerationResponse(answer_text="", grounded=False),
+                guardrail=GuardrailResult(passed=False, reason=e.detail),
+                latency=latency,
+                transcript=transcription.text,
+                detected_language=lang,
+            )

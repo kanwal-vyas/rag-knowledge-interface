@@ -325,13 +325,16 @@ async def query(request: Request, body: QueryRequest) -> QueryResponse:
             latency={"total_ms": 0, "error": str(e)},
         )
 
-    # Check guardrail refusal.
+    # Check guardrail refusal or generation error.
     if result.guardrail and not result.guardrail.passed:
+        latency_dict = _format_latency(result.latency)
+        if result.guardrail.reason:
+            latency_dict["error"] = result.guardrail.reason
         return QueryResponse(
             answer="",
             grounded=False,
             request_id=request_id,
-            latency=_format_latency(result.latency),
+            latency=latency_dict,
         )
 
     answer = result.response.answer_text if result.response else ""
@@ -430,15 +433,18 @@ async def voice_query(
     answer = result.response.answer_text if result.response else ""
     grounded = result.response.grounded if result.response else False
 
-    # Guardrail refusal.
+    # Guardrail refusal or generation error.
     if result.guardrail and not result.guardrail.passed:
+        latency_dict = _format_latency(result.latency)
+        if result.guardrail.reason:
+            latency_dict["error"] = result.guardrail.reason
         return VoiceQueryResponse(
             transcript=result.transcript or "",
             detected_language=result.detected_language or "",
             answer="",
             grounded=False,
             request_id=request_id,
-            latency=_format_latency(result.latency),
+            latency=latency_dict,
         )
 
     return VoiceQueryResponse(

@@ -454,3 +454,114 @@ class TestSarvamLanguageHint:
         assert sent_data.get("language_code") == "hi-IN"
         assert sent_data.get("model") == "saaras:v3"
         assert sent_data.get("mode") == "transcribe"
+
+
+# ---------------------------------------------------------------------------
+# STT + generation failure preservation tests
+# ---------------------------------------------------------------------------
+
+class TestVoicePipelineErrorPreservation:
+    """Verify STT results are preserved when generation fails."""
+
+    def _make_pipeline(self, stt_text: str = "capital of India", stt_lang: str = "en"):
+        from app.harness.text_pipeline import TextPipeline
+        from generation.deepseek_provider import StubGenerator
+
+        passage_store = {"p001": "The capital of India is New Delhi."}
+
+        class MockRetriever:
+            def retrieve(self, query, mode, top_k):
+                from app.models.retrieval import Language, Passage, RetrievalResult
+                return [
+                    RetrievalResult(
+                        passage=Passage(
+                            passage_id="p001",
+                            text=passage_store["p001"],
+                            lang=Language("en"),
+                        ),
+                        score=0.9,
+                        source="mock",
+                    ),
+                ]
+
+        return TextPipeline(
+            retriever=MockRetriever(),
+            generator=StubGenerator(answer="New Delhi.", grounded=True),
+            passage_store=passage_store,
+            stt_provider=StubSTTProvider(text=stt_text, lang=stt_lang),
+        )
+
+    def test_successful_stt_and_generation_preserves_transcript(self) -> None:
+        """Successful STT + successful generation: transcript and answer both present."""
+        pipeline = self._make_pipeline(stt_text="What was the Manhattan Project?", stt_lang="en")
+        result = pipeline.run_voice(b"audio", "wav")
+        assert result.transcript == "What was the Manhattan Project?"
+        assert result.detected_language == "en"
+        assert result.response is not None
+        assert result.response.answer_text != ""
+        assert result.guardrail is None or result.guardrail.passed
+
+    def test_successful_stt_and_generation_error_preserves_transcript(self) -> None:
+        """Successful STT + generation failure: transcript preserved, error in guardrail."""
+        from app.core.errors import RateLimitError
+        from app.harness.text_pipeline import TextPipeline
+
+        class FailingGenerator:
+            def generate(self, context):
+                raise RateLimitError("capacity")
+
+        passage_store = {"p001": "Some context."}
+
+        class MockRetriever:
+            def retrieve(self, query, mode, top_k):
+                from app.models.retrieval import Language, Passage, RetrievalResult
+                return [
+                    RetrievalResult(
+                        passage=Passage(
+                            passage_id="p001",
+                            text="Some context.",
+                            lang=Language("en"),
+                        ),
+                        score=0.9,
+                        source="mock",
+                    ),
+                ]
+
+        pipeline = TextPipeline(
+            retriever=MockRetriever(),
+            generator=FailingGenerator(),
+            passage_store=passage_store,
+            stt_provider=StubSTTProvider(text="What was the Manhattan Project?", lang="en"),
+        )
+        result = pipeline.run_voice(b"audio", "wav")
+        assert result.transcript == "What was the Manhattan Project?"
+        assert result.detected_language == "en"
+        assert result.response is not None
+        assert result.response.answer_text == ""
+        assert result.response.grounded is False
+        assert result.guardrail is not None
+        assert result.guardrail.passed is False
+        assert "capacity" in (result.guardrail.reason or "")
+
+    def test_successful_stt_and_retrieval_failure_preserves_transcript(self) -> None:
+        """Successful STT + retrieval failure: transcript preserved."""
+        from app.core.errors import PipelineError
+        from app.harness.text_pipeline import TextPipeline
+
+        class FailingRetriever:
+            def retrieve(self, query, mode, top_k):
+                raise PipelineError("connection refused")
+
+        pipeline = TextPipeline(
+            retriever=FailingRetriever(),
+            generator=None,
+            passage_store={},
+            stt_provider=StubSTTProvider(text="hello world", lang="en"),
+        )
+        result = pipeline.run_voice(b"audio", "wav")
+        assert result.transcript == "hello world"
+        assert result.detected_language == "en"
+        assert result.response is not None
+        assert result.response.answer_text == ""
+        assert result.guardrail is not None
+        assert result.guardrail.passed is False
