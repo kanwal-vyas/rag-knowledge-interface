@@ -93,8 +93,11 @@ export default function Home() {
   const recordStartRef = useRef<number>(0);
   const sessionRef = useRef<number>(0);
   const lastBlobRef = useRef<Blob | null>(null);
+  const audioUrlRef = useRef<string | null>(null);
   const [diagResult, setDiagResult] = useState("");
   const [diagBusy, setDiagBusy] = useState(false);
+  const [canPlay, setCanPlay] = useState(false);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
 
   useEffect(() => {
     getHealth().then((data) => setHealth(data.status === "ok" ? "online" : "degraded")).catch(() => setHealth("offline"));
@@ -105,6 +108,8 @@ export default function Home() {
       if (rec && rec.state !== "inactive") {
         try { rec.stop(); } catch { /* already stopped */ }
       }
+      // Release audio URL.
+      if (audioUrlRef.current) { URL.revokeObjectURL(audioUrlRef.current); audioUrlRef.current = null; }
     };
   }, []);
 
@@ -135,6 +140,15 @@ export default function Home() {
       }
 
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+      // Log MediaStream diagnostics.
+      const tracks = stream.getTracks();
+      console.log(`[Voice] ═══ MICROPHONE ═══`);
+      console.log(`[Voice] tracks: ${tracks.length}`);
+      tracks.forEach((t, i) => console.log(`[Voice]   track[${i}]: kind=${t.kind} label=${t.label} readyState=${t.readyState} enabled=${t.enabled} muted=${t.muted}`));
+      console.log(`[Voice] stream.active: ${stream.active}`);
+      console.log(`[Voice] ═══════════════════`);
+
       const recorder = new MediaRecorder(stream);
 
       // Clear old chunks and increment session BEFORE registering handlers.
@@ -195,8 +209,12 @@ export default function Home() {
         URL.revokeObjectURL(diagLink.href);
         console.log(`[Voice] [session=${capturedSession}] DIAGNOSTIC: downloaded ${diagLink.download}`);
 
-        // Store blob ref for /diagnose/audio button.
+        // Store blob ref for playback and /diagnose/audio.
         lastBlobRef.current = blob;
+        if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current);
+        audioUrlRef.current = URL.createObjectURL(blob);
+        setCanPlay(true);
+        console.log(`[Voice] [session=${capturedSession}] PLAYBACK URL: ${audioUrlRef.current}`);
 
         setState("processing");
         // Fire-and-forget async processing — session guard prevents stale results.
@@ -310,6 +328,11 @@ export default function Home() {
               {isBusy && <div className="processing-line"><span /> <b>Retrieving knowledge and generating answer</b></div>}
             </div>
             <div style={{ marginTop: "0.75rem" }}>
+              {canPlay && audioUrlRef.current && (
+                <button onClick={() => { const a = new Audio(audioUrlRef.current!); a.play().catch(() => {}); }} style={{ fontSize: "0.7rem", padding: "4px 10px", background: "rgba(120,200,120,0.15)", border: "1px solid rgba(120,200,120,0.3)", borderRadius: "4px", color: "#8c8", cursor: "pointer", marginRight: "6px" }}>
+                  ▶ Play last recording
+                </button>
+              )}
               <button onClick={runDiag} disabled={diagBusy || !lastBlobRef.current} style={{ fontSize: "0.7rem", padding: "4px 10px", background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "4px", color: "var(--fg-secondary)", cursor: lastBlobRef.current ? "pointer" : "not-allowed" }}>
                 {diagBusy ? "Running ..." : "Diagnose last recording (WebM vs OGG)"}
               </button>
