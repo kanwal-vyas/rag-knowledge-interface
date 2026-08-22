@@ -182,10 +182,43 @@ class SarvamSTTProvider(STTProvider):
                 "Install with: pip install httpx"
             ) from exc
 
+        # Convert WebM/Opus to OGG/Opus for more reliable Sarvam transcription.
+        # Chrome MediaRecorder produces WebM/Opus that Sarvam sometimes mishandles.
+        # Extracting the raw Opus frames and rewrapping as OGG gives Sarvam a
+        # format it processes correctly, while preserving the exact audio content.
+        send_bytes = audio_bytes
+        send_format = audio_format
+        if audio_format == "webm":
+            try:
+                from app.services.opus_extract import webm_to_ogg_opus
+                ogg_bytes, diag = webm_to_ogg_opus(audio_bytes)
+                packet_count = diag.get("opus_packets_found", 0)
+                if ogg_bytes and packet_count > 0:
+                    send_bytes = ogg_bytes
+                    send_format = "ogg"
+                    logger.info(
+                        "webm_to_ogg_converted",
+                        original_bytes=len(audio_bytes),
+                        ogg_bytes=len(ogg_bytes),
+                        opus_packets=packet_count,
+                    )
+                else:
+                    logger.warning(
+                        "webm_to_ogg_failed",
+                        note="No Opus packets extracted; sending original WebM.",
+                        diag_error=diag.get("error"),
+                    )
+            except Exception as e:
+                logger.warning(
+                    "webm_to_ogg_error",
+                    error=str(e),
+                    note="Conversion failed; sending original WebM.",
+                )
+
         # Prepare the multipart form data.
         # Sarvam expects: file, model, mode, and optionally language_code.
         files = {
-            "file": (f"audio.{audio_format}", io.BytesIO(audio_bytes), f"audio/{audio_format}"),
+            "file": (f"audio.{send_format}", io.BytesIO(send_bytes), f"audio/{send_format}"),
         }
         data: dict[str, str] = {
             "model": self.model,
