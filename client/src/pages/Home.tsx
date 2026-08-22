@@ -92,6 +92,9 @@ export default function Home() {
   const timerRef = useRef<number | undefined>(undefined);
   const recordStartRef = useRef<number>(0);
   const sessionRef = useRef<number>(0);
+  const lastBlobRef = useRef<Blob | null>(null);
+  const [diagResult, setDiagResult] = useState("");
+  const [diagBusy, setDiagBusy] = useState(false);
 
   useEffect(() => {
     getHealth().then((data) => setHealth(data.status === "ok" ? "online" : "degraded")).catch(() => setHealth("offline"));
@@ -181,6 +184,20 @@ export default function Home() {
           setError("No audio was captured. Please try again."); setState("error");
           return;
         }
+
+        // DIAGNOSTIC: Auto-download the exact blob for /diagnose/audio testing.
+        const diagLink = document.createElement("a");
+        diagLink.href = URL.createObjectURL(blob);
+        diagLink.download = `recording_s${capturedSession}_${blob.size}b.webm`;
+        document.body.appendChild(diagLink);
+        diagLink.click();
+        document.body.removeChild(diagLink);
+        URL.revokeObjectURL(diagLink.href);
+        console.log(`[Voice] [session=${capturedSession}] DIAGNOSTIC: downloaded ${diagLink.download}`);
+
+        // Store blob ref for /diagnose/audio button.
+        lastBlobRef.current = blob;
+
         setState("processing");
         // Fire-and-forget async processing — session guard prevents stale results.
         processVoiceBlob(blob, capturedSession, capturedChunks.length, wallMs);
@@ -215,6 +232,24 @@ export default function Home() {
       console.log(`[Voice] [session=${sessionId}] error: ${err}`);
       setError(err instanceof Error ? err.message : "Voice processing failed. Please try text instead.");
       setState("error");
+    }
+  };
+
+  const runDiag = async () => {
+    const blob = lastBlobRef.current;
+    if (!blob) { setDiagResult("No recording available. Record something first."); return; }
+    setDiagBusy(true); setDiagResult("Sending to /diagnose/audio ...\n");
+    try {
+      const form = new FormData();
+      form.append("file", blob, "diag.webm");
+      form.append("lang", voiceLang || "en");
+      const resp = await fetch(`${(import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/\/$/, "")}/diagnose/audio`, { method: "POST", body: form });
+      const json = await resp.json();
+      setDiagResult(JSON.stringify(json, null, 2));
+    } catch (e) {
+      setDiagResult(`Error: ${e}`);
+    } finally {
+      setDiagBusy(false);
     }
   };
 
@@ -273,6 +308,12 @@ export default function Home() {
               </div>
               {state === "recording" && <div className="recording-note"><span className="live-dot" /> Recording in progress. Tap stop when you’re finished.</div>}
               {isBusy && <div className="processing-line"><span /> <b>Retrieving knowledge and generating answer</b></div>}
+            </div>
+            <div style={{ marginTop: "0.75rem" }}>
+              <button onClick={runDiag} disabled={diagBusy || !lastBlobRef.current} style={{ fontSize: "0.7rem", padding: "4px 10px", background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "4px", color: "var(--fg-secondary)", cursor: lastBlobRef.current ? "pointer" : "not-allowed" }}>
+                {diagBusy ? "Running ..." : "Diagnose last recording (WebM vs OGG)"}
+              </button>
+              {diagResult && <pre style={{ marginTop: "0.5rem", fontSize: "0.65rem", maxHeight: "300px", overflow: "auto", padding: "8px", background: "rgba(0,0,0,0.3)", borderRadius: "4px", whiteSpace: "pre-wrap", wordBreak: "break-all", color: "var(--fg-secondary)" }}>{diagResult}</pre>}
             </div>
 
             <div className="examples"><div className="section-label"><Sparkles size={14} /> TRY AN EXAMPLE</div>{examples.map((example) => <button key={example} onClick={() => { setQuery(example); setState("idle"); }}>{example}<ArrowUpRight size={14} /></button>)}</div>
