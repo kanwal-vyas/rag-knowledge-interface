@@ -390,6 +390,8 @@ export default function Home() {
     // The ref is updated synchronously, so rapid double-clicks cannot create
     // parallel microphone/WebSocket sessions before React rerenders.
     if (streamClientRef.current || streamStoppingRef.current || state === "recording" || state === "processing") return;
+    console.info("[VoiceLifecycle] CLICK #1");
+    console.info("[VoiceLifecycle] START REQUESTED");
     setError("");
     setPartialText("");
     setStreamLatency([]);
@@ -399,6 +401,7 @@ export default function Home() {
     const client = new VoiceStreamClient({
       onConnected: (latencyMs) => {
         if (streamClientRef.current !== client) return;
+        console.info("[VoiceLifecycle] STREAMING STATE = true");
         setStreamLatency(prev => [...prev, `WS connect: ${latencyMs.toFixed(0)}ms`]);
       },
       onTimestamp: (label, ms) => {
@@ -484,12 +487,15 @@ export default function Home() {
 
     streamClientRef.current = client;
     await client.start(voiceLang || "en");
+    console.info(`[VoiceLifecycle] START COMPLETE (client state: ${client.state})`);
   };
 
   const stopStreamingVoice = () => {
     const client = streamClientRef.current;
     if (!client || streamStoppingRef.current) return;
 
+    console.info("[VoiceLifecycle] CLICK #2");
+    console.info("[VoiceLifecycle] STOP REQUESTED");
     streamStoppingRef.current = true;
     client.stopRecording();
     // Local capture is already released by stopRecording(); show the normal

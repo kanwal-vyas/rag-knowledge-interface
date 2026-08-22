@@ -252,6 +252,7 @@ export class VoiceStreamClient {
     if (this._stopping || this._state === "idle") return;
     this.ts("stopRecording() called");
     this._stopping = true;
+    console.info("[VoiceLifecycle] STREAMING STATE = false");
     this.stopAudioCapture();
 
     if (this.ws?.readyState === WebSocket.OPEN) {
@@ -275,14 +276,19 @@ export class VoiceStreamClient {
 
     const ws = this.ws;
     this.ws = null;
+    console.info(`[VoiceLifecycle] WEBSOCKET STATE BEFORE CLOSE = ${ws?.readyState ?? "none"}`);
     if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) {
-      try { ws.close(1000, "voice stream stopped"); } catch { /* already closed */ }
+      try {
+        ws.close(1000, "voice stream stopped");
+        console.info("[VoiceLifecycle] WEBSOCKET CLOSE CALLED");
+      } catch { /* already closed */ }
     }
 
     if (this._state !== "idle") {
       this.ts("stop() — session ended");
       this.setState("idle");
     }
+    console.info("[VoiceLifecycle] STOP COMPLETE");
   }
 
   /** Release all local audio resources before any network finalization wait. */
@@ -300,7 +306,12 @@ export class VoiceStreamClient {
 
     // Removing the handler synchronously drops already-queued PCM messages.
     try { if (workletNode) workletNode.port.onmessage = null; } catch { /* */ }
-    try { workletNode?.port.postMessage("stop"); } catch { /* */ }
+    try {
+      if (workletNode) {
+        workletNode.port.postMessage("stop");
+        console.info("[VoiceLifecycle] WORKLET STOPPED");
+      }
+    } catch { /* */ }
     try { sourceNode?.disconnect(); } catch { /* */ }
     try { workletNode?.disconnect(); } catch { /* */ }
     try {
@@ -308,6 +319,11 @@ export class VoiceStreamClient {
         void audioCtx.close().catch(() => {});
       }
     } catch { /* already closed */ }
-    try { stream?.getTracks().forEach((track) => track.stop()); } catch { /* */ }
+    try {
+      stream?.getTracks().forEach((track) => {
+        track.stop();
+        console.info(`[VoiceLifecycle] MEDIA TRACK STOPPED (${track.kind})`);
+      });
+    } catch { /* */ }
   }
 }
