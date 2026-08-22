@@ -384,6 +384,7 @@ async def voice_query(
             audio_format=audio_format,
             mode=retrieval_mode,
             top_k=top_k,
+            language_hint=lang or None,
         )
     except STTFailureError as e:
         logger.error("voice_stt_error", detail=e.detail)

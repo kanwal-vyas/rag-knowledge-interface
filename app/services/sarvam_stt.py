@@ -63,6 +63,9 @@ _BCP47_TO_ISO: dict[str, str] = {
     "sd-IN": "sd", "gom-IN": "gom",
 }
 
+# Reverse mapping: ISO 639-1 → BCP-47 (for sending language hints to Sarvam).
+_ISO_TO_BCP47: dict[str, str] = {v: k for k, v in _BCP47_TO_ISO.items()}
+
 # Maximum audio size: 10MB.
 _MAX_AUDIO_SIZE = 10 * 1024 * 1024
 
@@ -180,15 +183,30 @@ class SarvamSTTProvider(STTProvider):
             ) from exc
 
         # Prepare the multipart form data.
-        # Sarvam expects: file, model, mode.
-        # Language hint is not a direct parameter — mode=transcribe auto-detects.
+        # Sarvam expects: file, model, mode, and optionally language_code.
         files = {
             "file": (f"audio.{audio_format}", io.BytesIO(audio_bytes), f"audio/{audio_format}"),
         }
-        data = {
+        data: dict[str, str] = {
             "model": self.model,
             "mode": self.mode,
         }
+
+        # Map language hint to BCP-47 language_code for Sarvam.
+        # When no hint is provided, send "unknown" so Sarvam auto-detects.
+        hint = (language_hint or "").lower().strip()
+        bcp47 = _ISO_TO_BCP47.get(hint) if hint else None
+        if bcp47:
+            data["language_code"] = bcp47
+            logger.info("sarvam_language_hint", iso=hint, bcp47=bcp47)
+        else:
+            data["language_code"] = "unknown"
+            if hint:
+                logger.warning(
+                    "sarvam_unsupported_language_hint",
+                    iso=hint,
+                    note="Unknown hint; Sarvam will auto-detect.",
+                )
 
         headers = {
             "api-subscription-key": self.api_key,

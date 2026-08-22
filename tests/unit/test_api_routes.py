@@ -238,6 +238,36 @@ class TestVoiceQueryEndpoint:
         )
         assert resp.status_code == 200
 
+    def test_voice_with_english_lang_hint(self, client: TestClient) -> None:
+        """Voice endpoint accepts lang='en' hint."""
+        audio = b"RIFF" + b"\x00" * 100
+        resp = client.post(
+            "/voice/query",
+            files={"file": ("test.wav", audio, "audio/wav")},
+            data={"lang": "en"},
+        )
+        assert resp.status_code == 200
+
+    def test_voice_with_hindi_lang_hint(self, client: TestClient) -> None:
+        """Voice endpoint accepts lang='hi' hint."""
+        audio = b"RIFF" + b"\x00" * 100
+        resp = client.post(
+            "/voice/query",
+            files={"file": ("test.wav", audio, "audio/wav")},
+            data={"lang": "hi"},
+        )
+        assert resp.status_code == 200
+
+    def test_voice_with_empty_lang_defaults(self, client: TestClient) -> None:
+        """Voice endpoint accepts empty lang (auto-detect)."""
+        audio = b"RIFF" + b"\x00" * 100
+        resp = client.post(
+            "/voice/query",
+            files={"file": ("test.wav", audio, "audio/wav")},
+            data={"lang": ""},
+        )
+        assert resp.status_code == 200
+
 
 # ---------------------------------------------------------------------------
 # Audio format normalization tests

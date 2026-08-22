@@ -64,6 +64,20 @@ function SignalLogo() {
   return <div className="logo-mark" aria-label="HH RAG"><span /><i /><b /></div>;
 }
 
+const voiceLanguages = [
+  { value: "", label: "Auto-detect" },
+  { value: "en", label: "English" },
+  { value: "hi", label: "Hindi" },
+  { value: "gu", label: "Gujarati" },
+  { value: "bn", label: "Bengali" },
+  { value: "ta", label: "Tamil" },
+  { value: "te", label: "Telugu" },
+  { value: "mr", label: "Marathi" },
+  { value: "kn", label: "Kannada" },
+  { value: "ml", label: "Malayalam" },
+  { value: "pa", label: "Punjabi" },
+];
+
 export default function Home() {
   const [query, setQuery] = useState("");
   const [state, setState] = useState<UiState>("idle");
@@ -71,6 +85,7 @@ export default function Home() {
   const [error, setError] = useState("");
   const [recordSeconds, setRecordSeconds] = useState(0);
   const [health, setHealth] = useState("checking");
+  const [voiceLang, setVoiceLang] = useState("en");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
@@ -112,7 +127,7 @@ export default function Home() {
         if (!blob.size) { setError("No audio was captured. Please try again."); setState("error"); return; }
         setState("processing");
         try {
-          const voiceResult = await queryVoice(blob);
+          const voiceResult = await queryVoice(blob, voiceLang || undefined);
           setResult(voiceResult); setQuery(voiceResult.transcript || ""); setState("complete");
         } catch (err) {
           setError(err instanceof Error ? err.message : "Voice processing failed. Please try text instead."); setState("error");
@@ -160,7 +175,12 @@ export default function Home() {
               <div className="composer-head"><span>{state === "recording" ? "Listening" : state === "processing" ? "Working through the pipeline" : "Your question"}</span><span className="composer-mode">{state === "recording" ? `${String(Math.floor(recordSeconds / 60)).padStart(2, "0")}:${String(recordSeconds % 60).padStart(2, "0")}` : "TEXT / VOICE"}</span></div>
               <textarea ref={textareaRef} value={query} onChange={(event) => { setQuery(event.target.value); if (state === "error") setState("idle"); }} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") submitText(); }} placeholder="What would you like to understand?" disabled={state === "recording" || isBusy} aria-label="Ask the knowledge base" />
               <div className="composer-actions">
-                {state === "recording" ? <button className="mic-button recording" onClick={stopRecording} aria-label="Stop recording"><Square size={18} fill="currentColor" /><span className="pulse-ring" /></button> : <button className="mic-button" onClick={startRecording} disabled={isBusy} aria-label="Record a voice question"><Mic size={20} /></button>}
+                <div className="voice-controls">
+                  {state === "recording" ? <button className="mic-button recording" onClick={stopRecording} aria-label="Stop recording"><Square size={18} fill="currentColor" /><span className="pulse-ring" /></button> : <button className="mic-button" onClick={startRecording} disabled={isBusy} aria-label="Record a voice question"><Mic size={20} /></button>}
+                  <select className="voice-lang-select" value={voiceLang} onChange={(e) => setVoiceLang(e.target.value)} disabled={isBusy} aria-label="Voice language">
+                    {voiceLanguages.map((l) => <option key={l.value} value={l.value}>{l.label}</option>)}
+                  </select>
+                </div>
                 <button className="send-button" onClick={submitText} disabled={!query.trim() || isBusy || state === "recording"}><span>{isBusy ? "Processing" : "Ask"}</span>{isBusy ? <Activity size={17} className="spin" /> : <Send size={17} />}</button>
               </div>
               {state === "recording" && <div className="recording-note"><span className="live-dot" /> Recording in progress. Tap stop when you’re finished.</div>}

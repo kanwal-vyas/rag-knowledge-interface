@@ -279,6 +279,7 @@ class TextPipeline:
         audio_format: str,
         mode: RetrievalMode = RetrievalMode.CROSS_LINGUAL,
         top_k: int = 10,
+        language_hint: str | None = None,
     ) -> HarnessResult:
         """
         Execute the voice query pipeline.
@@ -290,6 +291,7 @@ class TextPipeline:
             audio_format: MIME type or format string (e.g., "wav", "mp3").
             mode: Retrieval mode (MONOLINGUAL or CROSS_LINGUAL).
             top_k: Number of retrieval results.
+            language_hint: Optional ISO 639-1 language code hint forwarded to the STT provider.
 
         Returns:
             HarnessResult with response, guardrail status, and latency.
@@ -312,6 +314,7 @@ class TextPipeline:
             transcription = self.stt_provider.transcribe(
                 audio_bytes=audio_bytes,
                 audio_format=audio_format,
+                language_hint=language_hint,
             )
         except Exception as e:
             latency.stt_ms = (

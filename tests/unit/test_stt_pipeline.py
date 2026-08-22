@@ -17,6 +17,7 @@ import pytest
 from app.core.errors import InvalidAudioError, STTFailureError
 from app.services.sarvam_stt import (
     _BCP47_TO_ISO,
+    _ISO_TO_BCP47,
     _map_language_code,
     _validate_audio,
 )
@@ -274,3 +275,182 @@ class TestVoicePipeline:
         result = pipeline.run_voice(b"hindi audio", "wav")
         assert result.response is not None
         assert result.latency.stt_ms is not None
+
+    def _make_pipeline_with_recording_stt(self, received_hints: list):
+        """Create a pipeline with a RecordingSTT that captures language_hint."""
+        from app.harness.text_pipeline import TextPipeline
+        from generation.deepseek_provider import StubGenerator
+
+        class RecordingSTT:
+            def transcribe(self, audio_bytes, audio_format, language_hint=None):
+                received_hints.append(language_hint)
+                from app.services.stt import TranscriptionResult
+                return TranscriptionResult(
+                    text="capital of India", lang="en", provider="stub",
+                )
+
+        passage_store = {"p001": "The capital of India is New Delhi."}
+
+        class MockRetriever:
+            def retrieve(self, query, mode, top_k):
+                from app.models.retrieval import Language, Passage, RetrievalResult
+                return [
+                    RetrievalResult(
+                        passage=Passage(
+                            passage_id="p001",
+                            text=passage_store["p001"],
+                            lang=Language("en"),
+                        ),
+                        score=0.9,
+                        source="mock",
+                    ),
+                ]
+
+        return TextPipeline(
+            retriever=MockRetriever(),
+            generator=StubGenerator(answer="New Delhi.", grounded=True),
+            passage_store=passage_store,
+            stt_provider=RecordingSTT(),
+        )
+
+    def test_voice_pipeline_forwards_language_hint(self) -> None:
+        """run_voice() forwards language_hint to the STT provider."""
+        received_hints: list[str | None] = []
+        pipeline = self._make_pipeline_with_recording_stt(received_hints)
+        pipeline.run_voice(b"audio", "wav", language_hint="en")
+        assert received_hints == ["en"]
+
+    def test_voice_pipeline_no_hint_defaults_to_none(self) -> None:
+        """run_voice() passes None when no language_hint is given."""
+        received_hints: list[str | None] = []
+        pipeline = self._make_pipeline_with_recording_stt(received_hints)
+        pipeline.run_voice(b"audio", "wav")
+        assert received_hints == [None]
+
+
+# ---------------------------------------------------------------------------
+# ISO → BCP-47 Reverse Mapping Tests
+# ---------------------------------------------------------------------------
+
+class TestISOTOBCP47:
+    """Tests for ISO 639-1 to BCP-47 mapping used when sending hints to Sarvam."""
+
+    def test_reverse_mapping_completeness(self) -> None:
+        """Every BCP-47 code has a corresponding ISO entry."""
+        for bcp47, iso in _BCP47_TO_ISO.items():
+            assert iso in _ISO_TO_BCP47, f"Missing reverse mapping for {iso}"
+            assert _ISO_TO_BCP47[iso] == bcp47
+
+    def test_english_reverse(self) -> None:
+        """en maps to en-IN."""
+        assert _ISO_TO_BCP47["en"] == "en-IN"
+
+    def test_hindi_reverse(self) -> None:
+        """hi maps to hi-IN."""
+        assert _ISO_TO_BCP47["hi"] == "hi-IN"
+
+    def test_gujarati_reverse(self) -> None:
+        """gu maps to gu-IN."""
+        assert _ISO_TO_BCP47["gu"] == "gu-IN"
+
+    def test_known_codes_roundtrip(self) -> None:
+        """Every code roundtrips: BCP-47 → ISO → BCP-47."""
+        for bcp47, iso in _BCP47_TO_ISO.items():
+            assert _ISO_TO_BCP47.get(iso) == bcp47
+
+
+# ---------------------------------------------------------------------------
+# Sarvam Language Hint Integration Tests
+# ---------------------------------------------------------------------------
+
+class TestSarvamLanguageHint:
+    """Tests for language_hint behavior in SarvamSTTProvider.
+
+    Uses monkeypatch on httpx.post and io.BytesIO since transcribe() does
+    local imports inside the method body.
+    """
+
+    @staticmethod
+    def _patch_httpx(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
+        """Patch httpx.post to capture data; return the sent_data dict."""
+        sent_data: dict[str, str] = {}
+
+        class FakeResponse:
+            status_code = 200
+
+            def json(self) -> dict[str, str]:
+                return {"transcript": "hello", "language_code": "en-IN"}
+
+        def fake_post(url: str, **kwargs: object) -> FakeResponse:  # noqa: ANN002
+            sent_data.update(kwargs.get("data", {}))  # type: ignore[arg-type]
+            return FakeResponse()
+
+        monkeypatch.setattr("httpx.post", fake_post)
+        return sent_data
+
+    def test_en_hint_sends_en_IN(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When language_hint='en', the API request contains language_code=en-IN."""
+        from app.services.sarvam_stt import SarvamSTTProvider
+
+        sent_data = self._patch_httpx(monkeypatch)
+        provider = SarvamSTTProvider(api_key="test-key")
+        result = provider.transcribe(b"audio data", "wav", language_hint="en")
+        assert result.text == "hello"
+        assert sent_data.get("language_code") == "en-IN"
+
+    def test_hi_hint_sends_hi_IN(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When language_hint='hi', the API request contains language_code=hi-IN."""
+        from app.services.sarvam_stt import SarvamSTTProvider
+
+        sent_data = self._patch_httpx(monkeypatch)
+        provider = SarvamSTTProvider(api_key="test-key")
+        result = provider.transcribe(b"audio data", "wav", language_hint="hi")
+        assert result.text == "hello"
+        assert sent_data.get("language_code") == "hi-IN"
+
+    def test_gu_hint_sends_gu_IN(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When language_hint='gu', the API request contains language_code=gu-IN."""
+        from app.services.sarvam_stt import SarvamSTTProvider
+
+        sent_data = self._patch_httpx(monkeypatch)
+        provider = SarvamSTTProvider(api_key="test-key")
+        provider.transcribe(b"audio data", "wav", language_hint="gu")
+        assert sent_data.get("language_code") == "gu-IN"
+
+    def test_none_hint_sends_unknown(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When language_hint=None, language_code='unknown' triggers auto-detect."""
+        from app.services.sarvam_stt import SarvamSTTProvider
+
+        sent_data = self._patch_httpx(monkeypatch)
+        provider = SarvamSTTProvider(api_key="test-key")
+        provider.transcribe(b"audio data", "wav", language_hint=None)
+        assert sent_data.get("language_code") == "unknown"
+
+    def test_empty_hint_sends_unknown(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When language_hint='', language_code='unknown' triggers auto-detect."""
+        from app.services.sarvam_stt import SarvamSTTProvider
+
+        sent_data = self._patch_httpx(monkeypatch)
+        provider = SarvamSTTProvider(api_key="test-key")
+        provider.transcribe(b"audio data", "wav", language_hint="")
+        assert sent_data.get("language_code") == "unknown"
+
+    def test_unsupported_hint_sends_unknown(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When language_hint is unsupported, language_code='unknown' triggers auto-detect."""
+        from app.services.sarvam_stt import SarvamSTTProvider
+
+        sent_data = self._patch_httpx(monkeypatch)
+        provider = SarvamSTTProvider(api_key="test-key")
+        provider.transcribe(b"audio data", "wav", language_hint="xyz")
+        assert sent_data.get("language_code") == "unknown"
+
+    def test_hint_is_case_insensitive(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Language hints are matched case-insensitively."""
+        from app.services.sarvam_stt import SarvamSTTProvider
+
+        sent_data = self._patch_httpx(monkeypatch)
+        provider = SarvamSTTProvider(api_key="test-key")
+        provider.transcribe(b"audio data", "wav", language_hint="HI")
+        assert sent_data.get("language_code") == "hi-IN"
+        assert sent_data.get("model") == "saaras:v3"
+        assert sent_data.get("mode") == "transcribe"

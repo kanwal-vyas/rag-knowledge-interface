@@ -71,11 +71,11 @@ export async function queryText(query_text: string): Promise<QueryResponse> {
   return parseResponse<QueryResponse>(response);
 }
 
-export async function queryVoice(blob: Blob): Promise<VoiceQueryResponse> {
+export async function queryVoice(blob: Blob, language?: string): Promise<VoiceQueryResponse> {
   const form = new FormData();
   const extension = blob.type.includes("webm") ? "question.webm" : "question.wav";
   form.append("file", blob, extension);
-  form.append("lang", "");
+  form.append("lang", language || "");
   form.append("retrieval_mode", "cross_lingual");
   form.append("top_k", "10");
 
