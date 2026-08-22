@@ -385,7 +385,10 @@ export default function Home() {
 
     const client = new VoiceStreamClient({
       onConnected: (latencyMs) => {
-        setStreamLatency(prev => [...prev, `WS connected in ${latencyMs.toFixed(0)}ms`]);
+        setStreamLatency(prev => [...prev, `WS connect: ${latencyMs.toFixed(0)}ms`]);
+      },
+      onTimestamp: (label, ms) => {
+        // Frontend timestamps are logged via console in voiceStream.ts.
       },
       onPartial: (text) => {
         setPartialText(text);
@@ -424,8 +427,18 @@ export default function Home() {
           setStreamLatency(prev => [...prev, `Warning: ${msg}`]);
         }
       },
-      onLatency: (totalMs, audioBytes) => {
-        setStreamLatency(prev => [...prev, `Total: ${totalMs.toFixed(0)}ms, ${audioBytes} bytes`]);
+      onLatency: (totalMs, audioBytes, backendBreakdown) => {
+        setStreamLatency(prev => {
+          const next = [...prev, `--- Backend breakdown ---`];
+          if (backendBreakdown) {
+            for (const [k, v] of Object.entries(backendBreakdown)) {
+              next.push(`  ${k}: ${v}ms`);
+            }
+          }
+          next.push(`  total_session: ${totalMs.toFixed(0)}ms`);
+          next.push(`  audio_bytes: ${audioBytes}`);
+          return next;
+        });
       },
     });
 
