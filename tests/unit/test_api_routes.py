@@ -210,3 +210,103 @@ class TestVoiceQueryEndpoint:
             files={"file": ("test.mp3", audio, "audio/mpeg")},
         )
         assert resp.status_code == 200
+
+    def test_voice_webm_opus_content_type(self, client: TestClient) -> None:
+        """WebM/Opus content type with codecs param is accepted."""
+        audio = b"\x1a\x45\xdf\xa3" + b"\x00" * 100
+        resp = client.post(
+            "/voice/query",
+            files={"file": ("recording.webm", audio, "audio/webm;codecs=opus")},
+        )
+        assert resp.status_code == 200
+
+    def test_voice_ogg_content_type(self, client: TestClient) -> None:
+        """OGG content type with codecs param is accepted."""
+        audio = b"OggS" + b"\x00" * 100
+        resp = client.post(
+            "/voice/query",
+            files={"file": ("recording.ogg", audio, "audio/ogg;codecs=opus")},
+        )
+        assert resp.status_code == 200
+
+    def test_voice_wav_content_type(self, client: TestClient) -> None:
+        """WAV content type is accepted."""
+        audio = b"RIFF" + b"\x00" * 100
+        resp = client.post(
+            "/voice/query",
+            files={"file": ("recording.wav", audio, "audio/wav")},
+        )
+        assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Audio format normalization tests
+# ---------------------------------------------------------------------------
+
+
+class TestAudioFormatNormalization:
+    """Tests for _normalize_audio_format."""
+
+    def test_normalize_webm_with_codecs(self) -> None:
+        """audio/webm;codecs=opus normalizes to webm."""
+        from app.api.routes import _normalize_audio_format
+        assert _normalize_audio_format("audio/webm;codecs=opus") == "webm"
+
+    def test_normalize_webm_without_prefix(self) -> None:
+        """webm;codecs=opus normalizes to webm."""
+        from app.api.routes import _normalize_audio_format
+        assert _normalize_audio_format("webm;codecs=opus") == "webm"
+
+    def test_normalize_ogg_codecs(self) -> None:
+        """audio/ogg;codecs=opus normalizes to ogg."""
+        from app.api.routes import _normalize_audio_format
+        assert _normalize_audio_format("audio/ogg;codecs=opus") == "ogg"
+
+    def test_normalize_wav(self) -> None:
+        """audio/wav normalizes to wav."""
+        from app.api.routes import _normalize_audio_format
+        assert _normalize_audio_format("audio/wav") == "wav"
+
+    def test_normalize_mpeg_to_mp3(self) -> None:
+        """audio/mpeg maps to mp3."""
+        from app.api.routes import _normalize_audio_format
+        assert _normalize_audio_format("audio/mpeg") == "mp3"
+
+    def test_normalize_already_clean(self) -> None:
+        """Already-normalized formats pass through."""
+        from app.api.routes import _normalize_audio_format
+        assert _normalize_audio_format("webm") == "webm"
+        assert _normalize_audio_format("wav") == "wav"
+        assert _normalize_audio_format("mp3") == "mp3"
+
+    def test_normalize_x_wav(self) -> None:
+        """audio/x-wav normalizes to wav."""
+        from app.api.routes import _normalize_audio_format
+        assert _normalize_audio_format("audio/x-wav") == "wav"
+
+    def test_normalize_unknown_passthrough(self) -> None:
+        """Unknown formats pass through unchanged."""
+        from app.api.routes import _normalize_audio_format
+        assert _normalize_audio_format("unknown") == "unknown"
+        assert _normalize_audio_format("xyz") == "xyz"
+
+    def test_normalize_case_insensitive(self) -> None:
+        """Normalization is case-insensitive."""
+        from app.api.routes import _normalize_audio_format
+        assert _normalize_audio_format("Audio/WebM;codecs=opus") == "webm"
+        assert _normalize_audio_format("WAV") == "wav"
+
+    def test_normalize_x_m4a(self) -> None:
+        """audio/x-m4a maps to mp4."""
+        from app.api.routes import _normalize_audio_format
+        assert _normalize_audio_format("audio/x-m4a") == "mp4"
+
+    def test_normalize_aac(self) -> None:
+        """audio/aac passes through."""
+        from app.api.routes import _normalize_audio_format
+        assert _normalize_audio_format("audio/aac") == "aac"
+
+    def test_normalize_flac(self) -> None:
+        """audio/flac passes through."""
+        from app.api.routes import _normalize_audio_format
+        assert _normalize_audio_format("audio/flac") == "flac"

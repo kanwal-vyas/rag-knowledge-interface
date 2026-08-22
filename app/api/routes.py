@@ -30,6 +30,61 @@ router = APIRouter()
 
 
 # ---------------------------------------------------------------------------
+# Audio format normalization
+# ---------------------------------------------------------------------------
+
+# MIME type / extension aliases → canonical format name.
+_AUDIO_FORMAT_ALIASES: dict[str, str] = {
+    "mpeg": "mp3",
+    "mpeg3": "mp3",
+    "x-mpeg-3": "mp3",
+    "x-mp3": "mp3",
+    "x-wav": "wav",
+    "wave": "wav",
+    "x-aac": "aac",
+    "x-flac": "flac",
+    "x-aiff": "aiff",
+    "x-ms-wma": "wma",
+    "x-m4a": "mp4",
+    "pcm_s16le": "pcm",
+    "pcm_l16": "pcm",
+    "pcm_raw": "pcm",
+}
+
+
+def _normalize_audio_format(raw: str) -> str:
+    """Normalize a MIME type or file extension to a canonical audio format.
+
+    Handles browser Content-Types like ``audio/webm;codecs=opus`` and
+    maps common MIME aliases to the short names expected by Sarvam.
+
+    Examples::
+        "audio/webm;codecs=opus" → "webm"
+        "webm;codecs=opus"       → "webm"
+        "audio/ogg;codecs=opus"  → "ogg"
+        "audio/mpeg"             → "mp3"
+        "audio/wav"              → "wav"
+        "webm"                   → "webm"
+    """
+    fmt = raw.strip().lower()
+
+    # 1. Strip MIME prefix (e.g. "audio/").
+    if "/" in fmt:
+        fmt = fmt.rsplit("/", 1)[-1]
+
+    # 2. Strip codec parameters (e.g. ";codecs=opus").
+    fmt = fmt.split(";", 1)[0].strip()
+
+    # 3. Strip any trailing whitespace or semicolons.
+    fmt = fmt.strip().rstrip("; ")
+
+    # 4. Map known aliases to canonical names.
+    fmt = _AUDIO_FORMAT_ALIASES.get(fmt, fmt)
+
+    return fmt
+
+
+# ---------------------------------------------------------------------------
 # Response models
 # ---------------------------------------------------------------------------
 
@@ -313,12 +368,14 @@ async def voice_query(
             latency={"total_ms": 0, "error": "Empty audio file"},
         )
 
-    # Determine audio format from content type or filename.
-    audio_format = "wav"
+    # Determine audio format from content type or filename,
+    # then normalize (e.g. "audio/webm;codecs=opus" → "webm").
+    raw_format = "wav"
     if file.content_type and "/" in file.content_type:
-        audio_format = file.content_type.split("/")[-1]
+        raw_format = file.content_type
     elif file.filename and "." in file.filename:
-        audio_format = file.filename.rsplit(".", 1)[-1]
+        raw_format = file.filename
+    audio_format = _normalize_audio_format(raw_format)
 
     try:
         pipeline = _get_pipeline()
